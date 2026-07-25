@@ -1,0 +1,70 @@
+# Development reverse proxy for ECV8.
+#
+# Production serves the Ember build and the Go API from one origin behind nginx.
+# This file reproduces that shape locally so the session cookie, SameSite, and
+# the standard library's cross-origin protection all behave the way they will in
+# production. Without it the Ember dev server (:4200) and the API (:3000) are
+# different origins, and every one of those mechanisms behaves differently.
+#
+#   caddy run --config dev/Caddyfile
+#
+# Then browse http://localhost:8081. Do not browse http://localhost:4200
+# directly: it bypasses this proxy and the cookie will not be sent.
+#
+# Ports
+#   8081  Caddy, the only origin a browser should use
+#   4200  Ember dev server (pnpm start in ../app)
+#   3000  Go API (ecv8-api serve)
+#
+# Routing
+#   /api/*   -> Go API
+#   /*       -> Ember dev server, including its Vite HMR WebSocket
+#
+# Cookies in development
+#   The API must run with --cookie-secure=false here, because this origin is
+#   plain http and a browser silently discards a Secure cookie sent over http.
+#   Production sets it back to true. SameSite=Lax works unchanged either way,
+#   since the browser sees a single origin.
+#
+# Cross-origin protection in development
+#   http.CrossOriginProtection reads Sec-Fetch-Site. Requests the browser makes
+#   from http://localhost:8081 to http://localhost:8081/api/... are same-origin,
+#   so they pass with no configuration. A request from any other origin is
+#   rejected, which is the intended behaviour. If you need to allow one — a
+#   separate tool on another port — add it explicitly with --trusted-origin
+#   rather than loosening the proxy.
+#
+# HTTPS variant
+#   To match production more closely, replace the site address below with
+#   `https://ec.localhost`, set the API back to --cookie-secure=true, and set
+#   EC_PUBLIC_BASE_URL=https://ec.localhost. Caddy issues a certificate from its
+#   internal CA; the first run asks for sudo so it can trust that CA locally.
+{
+	# Nothing here is public, and the plain-http site address below would
+	# otherwise make Caddy try to obtain a real certificate.
+	auto_https off
+	admin off
+}
+
+http://localhost:8081 {
+	log {
+		output stderr
+		format console
+	}
+
+	# The API owns this prefix. handle blocks are mutually exclusive, so the
+	# first match wins and nothing here falls through to Ember.
+	handle /api/* {
+		# Caddy forwards X-Forwarded-For and X-Forwarded-Proto by default. The
+		# API ignores them unless a proxy is explicitly trusted, so run it with
+		# --trusted-proxy 127.0.0.1/32 if you want request logs to show the real
+		# client address.
+		reverse_proxy 127.0.0.1:3000
+	}
+
+	# Everything else is the Ember dev server. reverse_proxy passes WebSocket
+	# upgrades through unchanged, which is what Vite's HMR needs.
+	handle {
+		reverse_proxy 127.0.0.1:4200
+	}
+}

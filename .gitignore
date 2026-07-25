@@ -1,0 +1,28 @@
+# Build output
+/ecv8-api
+/bin/
+/dist/
+
+# Databases. ecv8.db and its WAL sidecars are runtime data and must never be
+# committed: they hold password hashes, activation-token hashes, and live
+# session fingerprints.
+*.db
+*.db-wal
+*.db-shm
+/db/
+
+# Dotenv files that may hold secrets. .env and .env.{environment} are shared and
+# must stay secret-free, so they are tracked; the .local variants are not.
+.env.local
+.env.*.local
+
+# Go tooling
+*.test
+*.out
+/coverage.*
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*.swp
