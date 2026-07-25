@@ -11,6 +11,7 @@ work here_ — the conventions, the checks, and the traps.
 | --------------------------------- | -------------------------------------- |
 | What the service does, why        | `README.md` (this directory)           |
 | What every `ecdb` subcommand does | `cmd/ecdb/README.md`                   |
+| What the clients do, and their one shared session | `README.md` § Commands |
 | Every flag and environment variable | `README.md` § Configuration, `.env.example` |
 | Endpoint list and payload shapes  | `README.md` § HTTP API                 |
 | Why a security choice was made    | `README.md` § Security notes           |
@@ -42,29 +43,57 @@ go run ./cmd/ecapi serve --memory dev       # seeded in-memory database
 go run ./cmd/ecdb database verify --db-path games/alpha
 ```
 
-Three binaries are built from this module, and the split between them is the
+Four binaries are built from this module, and the split between them is the
 point. `cmd/ecdb` owns the database file and takes only `--db-path` and
 `--quiet`; every operation on the file lives under its `database` subcommand
 (`create`, `verify`, `version`, `upgrade`, `backup`, `compact`), so a new
 storage-only command has an obvious home and the group's existence keeps
 non-database work visibly separate. `cmd/ecapi` serves HTTP and never creates a
-database. `cmd/earl` is a client and never touches either. `air` builds `ecapi`.
+database. `cmd/earl` and `cmd/ec` are clients and never touch either. `air`
+builds `ecapi`.
 
 Keep the boundaries. A command that creates a database must not also be able to
 serve one, because the long-running service is then confined to what it
 actually needs. Storage work goes in `ecdb`, not `ecapi`.
 
-**`earl` speaks HTTP and only HTTP.** It must never import `internal/store`,
-never open a database, and never implement a rule the server owns — it sends a
-request and prints what comes back. Its value is that it is not privileged: if
-`earl` can do something, a real client can. A convenience that shortcuts the API
-would quietly destroy that. The REST surface is its command line
+**The clients speak HTTP and only HTTP.** Neither may import `internal/store`,
+open a database, or implement a rule the server owns — they send a request and
+print what comes back. Their value is that they are not privileged: if a client
+can do something, a real client can. A convenience that shortcuts the API would
+quietly destroy that, and applies to `ec` first, because a convenience command
+is exactly where the shortcut would look reasonable.
+
+`earl` is the raw client. The REST surface is its command line
 (`earl get /admin/accounts`), so a new endpoint needs no `earl` change; only the
 commands that touch the saved session — `login`, `logout`, `identities` — are
 special, plus `whoami` as the one alias.
 
-The saved session cookie is a live credential. `earl` writes it `0600` and never
-prints it, on the same rule the server follows: never log a token, a cookie
+`ec` is the game master's convenience client and does nothing `earl` cannot. Its
+commands sit a level down (`ec app login`, `ec version`) because its surface is
+expected to grow broad; new work goes in a group, not at the top level. A new
+endpoint needs no `ec` change either unless a game master wants a name for it.
+
+**Everything both clients share is `internal/apiclient`** — the transport,
+`--base-url` and the other common flags (registered once by `apiclient.Bind`,
+for the same reason as `bindDBPath`), the cookie rules, and the credential
+store. Do not add a second copy in a `cmd/`. The package belongs to the clients:
+nothing under `internal/server` may import it.
+
+**One saved session, shared.** Both clients read and write
+`~/.config/ecv8/{EC_ENV}/credentials.json`, so a login through either is a login
+for both. That is why their flags share the `ECV8_` prefix rather than having
+one each: sessions are keyed by base URL, so two prefixes would let the two
+commands be pointed at different servers and stop sharing without saying so.
+`ECV8_` is deliberately not the server's `EC_`.
+
+`ECV8_` prefixes *flags* only. **The environment is `EC_ENV`, not `ECV8_ENV`** —
+there is no `--env` flag, so nothing reads `ECV8_ENV`, and setting it selects
+nothing while looking like it should. `EC_ENV` is read directly in `main`,
+before flags parse, exactly as `ecapi` and `ecdb` read it: a checkout has one
+idea of which environment it is in, and the clients do not get a second one.
+
+The saved session cookie is a live credential. It is written `0600` and never
+printed, on the same rule the server follows: never log a token, a cookie
 value, a password, or a hash.
 
 `cmd/ecapi/ecapi.service` is a sample systemd unit, documentation only. Nothing

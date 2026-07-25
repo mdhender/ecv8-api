@@ -16,6 +16,11 @@ parent repository above the two.
 - [Quick start](#quick-start)
 - [Configuration](#configuration)
 - [Commands](#commands)
+  - [ecdb](#ecdb)
+  - [ecapi](#ecapi)
+  - [earl](#earl)
+  - [ec](#ec)
+  - [The shared session](#the-shared-session)
 - [The database](#the-database)
   - [Creating and opening](#creating-and-opening)
   - [Migrations](#migrations)
@@ -148,10 +153,11 @@ a silent authentication failure rather than an obvious one:
 
 ## Commands
 
-**`ecdb` owns the database file. `ecapi` serves HTTP. `earl` is a client.** They
-are separate binaries so the long-running service can be installed and confined
-without carrying the ability to create a database or seed an administrator, and
-so the client has no way to reach the database at all.
+**`ecdb` owns the database file. `ecapi` serves HTTP. `earl` and `ec` are
+clients.** They are separate binaries so the long-running service can be
+installed and confined without carrying the ability to create a database or seed
+an administrator, and so neither client has any way to reach the database at
+all.
 
 ```
 ecdb database create              create ecv8.db and seed the initial admin
@@ -169,6 +175,10 @@ earl get|post|put|patch|delete    send that method to an API path
 earl login | logout               authenticate, and save or forget the session
 earl whoami | identities          show the current session, or the saved ones
 earl version                      print the build version
+
+ec app login | logout             authenticate, and save or forget the session
+ec app whoami | identities        show the current session, or the saved ones
+ec version                        print the build version
 ```
 
 Every command accepts `--help`, which lists the flags in scope with their
@@ -187,50 +197,7 @@ schema.
 what each one prints, what it refuses, the initial-administrator variables, the
 backup procedure, and why `backup` and `compact` never migrate.
 
-### earl
-
-`earl` exercises the API the way a client does, over HTTP and nothing else. It
-imports no store package and cannot open the database, which is what makes it
-evidence: if `earl` can do it, a real client can.
-
-The REST surface is the command line — the verb and path you would send are what
-you type — so it covers every endpoint without per-endpoint code:
-
-```bash
-earl login --email admin@example.com          # password from EARL_PASSWORD
-earl whoami                                   # sugar for: earl get /session
-earl get /admin/accounts
-earl post /admin/accounts -d '{"email":"t@x.com","role":"user","display_name":"T"}'
-earl patch /me -d @profile.json
-earl get /me --no-auth                        # see what an anonymous caller gets
-```
-
-Paths are relative to `--base-url` (`EARL_BASE_URL`), which defaults to
-`http://localhost:3000` and has `/api/v1` appended when it carries no path of
-its own. `earl` addresses the API directly rather than through the development
-proxy, because none of the reasons a browser must use the proxy apply to it: it
-sends no `Origin`, so cross-origin protection does not reject it, and it stores
-the session cookie itself.
-
-This API authenticates with an HttpOnly session cookie, and that cookie's value
-is returned exactly once, in the `Set-Cookie` header of a successful login.
-`earl login` captures it and saves it in
-`~/.config/earl/{EC_ENV}/credentials.json`, keyed by base URL and account, so
-several identities can be held at once and `--email` picks between them. **The
-saved value is a live session token**, so the file is `0600` in a `0700`
-directory and `earl` never prints it. `EARL_CREDENTIALS` overrides the path.
-
-`earl` does not need to be told the cookie's name, even though `--cookie-name`
-makes it configurable: a login sets exactly one cookie, so whatever arrives is
-the session, and its name is saved with it for later requests. `--cookie-name`
-is only a tie-breaker for when something in front of the API — a load balancer
-adding a routing cookie — sets one too. Faced with two, `earl` names them and
-stops rather than guessing, because guessing would mean sending a routing cookie
-as a credential and saving no session at all.
-
-Its own flags read `EARL_`-prefixed variables rather than `EC_`, so pointing the
-client at another host never means touching a server's configuration. `EC_ENV`
-is shared, because a checkout has one idea of which environment it is in.
+### ecapi
 
 `cmd/ecapi/ecapi.service` is a sample systemd unit for running `ecapi` behind
 nginx as an unprivileged `ecapi:ecapi`, with everything under one tree:
@@ -244,6 +211,90 @@ nginx as an unprivileged `ecapi:ecapi`, with everything under one tree:
 
 It is a starting point to copy, not something the build installs — deployment
 stays an operator's decision, and nothing in this repository reads it.
+
+### earl
+
+`earl` exercises the API the way a client does, over HTTP and nothing else. It
+imports no store package and cannot open the database, which is what makes it
+evidence: if `earl` can do it, a real client can.
+
+The REST surface is the command line — the verb and path you would send are what
+you type — so it covers every endpoint without per-endpoint code:
+
+```bash
+earl login --email admin@example.com          # password from ECV8_PASSWORD
+earl whoami                                   # sugar for: earl get /session
+earl get /admin/accounts
+earl post /admin/accounts -d '{"email":"t@x.com","role":"user","display_name":"T"}'
+earl patch /me -d @profile.json
+earl get /me --no-auth                        # see what an anonymous caller gets
+```
+
+Paths are relative to `--base-url` (`ECV8_BASE_URL`), which defaults to
+`http://localhost:3000` and has `/api/v1` appended when it carries no path of
+its own. `earl` addresses the API directly rather than through the development
+proxy, because none of the reasons a browser must use the proxy apply to it: it
+sends no `Origin`, so cross-origin protection does not reject it, and it stores
+the session cookie itself.
+
+### ec
+
+`ec` is the game master's client. It can do nothing `earl` cannot — same HTTP,
+same rules, same restraint about the database — and exists because `earl` is the
+wrong shape for running a game: a game master should not have to remember which
+path a task lives behind.
+
+```bash
+ec app login --email gm1@example.com          # password from ECV8_PASSWORD
+ec app whoami
+ec app identities
+ec app logout
+ec version
+```
+
+The commands sit under `app` rather than at the top level because `ec` is
+expected to grow a broad surface, and grouping from the start is cheaper than
+moving verbs later. `version` stands alone because it reports the build and
+talks to nothing.
+
+### The shared session
+
+Both clients read and write **one** credential file, so a game master signs in
+once and both tools are signed in — `ec app login` then `earl get /admin/games`
+works, and `ec app logout` ends the session for both.
+
+This API authenticates with an HttpOnly session cookie, and that cookie's value
+is returned exactly once, in the `Set-Cookie` header of a successful login.
+Login captures it and saves it in `~/.config/ecv8/{EC_ENV}/credentials.json`,
+keyed by base URL and account, so several identities can be held at once and
+`--email` picks between them. **The saved value is a live session token**, so
+the file is `0600` in a `0700` directory and neither client ever prints it.
+`ECV8_CREDENTIALS` overrides the path.
+
+Neither client needs to be told the cookie's name, even though `--cookie-name`
+makes it configurable: a login sets exactly one cookie, so whatever arrives is
+the session, and its name is saved with it for later requests. `--cookie-name`
+is only a tie-breaker for when something in front of the API — a load balancer
+adding a routing cookie — sets one too. Faced with two, the client names them
+and stops rather than guessing, because guessing would mean sending a routing
+cookie as a credential and saving no session at all.
+
+Client flags read `ECV8_`-prefixed variables rather than `EC_`, so pointing a
+client at another host never means touching a server's configuration. The prefix
+is shared between the two clients rather than being per-command **because the
+sessions are**: they are keyed by base URL, so if `ec` and `earl` read different
+variables they could be pointed at different servers, and the shared file would
+silently stop being shared.
+
+The prefix covers flags only. **The environment variable is `EC_ENV`, not
+`ECV8_ENV`**: there is no `--env` flag, so nothing reads `ECV8_ENV`. `EC_ENV` is
+read directly at startup, before flags parse, exactly as `ecapi` and `ecdb` read
+it — a checkout has one idea of which environment it is in, and it scopes the
+credential file so a development session and a production session are never
+confused.
+
+The transport, the cookie rules, and the credential store are
+`internal/apiclient`, written once for both. The server never imports it.
 
 ---
 
@@ -335,8 +386,10 @@ cmd/ecdb/              database commands: create, verify, version, upgrade,
                        README.md: the command reference for all of them
 cmd/ecapi/             server entry point, command tree, logger construction
                        ecapi.service: sample systemd unit, installed by hand
-cmd/earl/              API client; HTTP only, no store package, no game rules
+cmd/earl/              raw API client: the verb and path you type are what it sends
+cmd/ec/                the game master's client; convenience over the same API
 internal/
+  apiclient/           the clients' shared transport, cookie rules, and sessions
   cerrs/               constant sentinel errors
   config/              flags, environment, validation, precedence
   dotenv/              dotenv loading, patterned after ../ecv7
@@ -353,6 +406,11 @@ Notable choices:
 
 - **Echo v5** is the router. Its `Context` is a struct, its error handler
   returns nothing, and `log/slog` is built in — none of the v4 idioms apply.
+- **Two clients, one client package.** `earl` and `ec` are separate commands
+  with separate surfaces, but the same server, the same cookie rules, and the
+  same saved sessions, so all of that lives in `internal/apiclient` rather than
+  being written twice and drifting. It depends on nothing the server owns, and
+  nothing the server builds may import it.
 - **The logger is injected**, never global. It lives on the server struct and is
   passed explicitly to everything that needs it.
 - **The store returns `*store.DB`, not `*sql.DB`.** ZombieZen states plainly that

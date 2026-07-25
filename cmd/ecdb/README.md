@@ -1,11 +1,11 @@
 # `ecdb`
 
 `ecdb` creates and maintains the SQLite database used by ECV8. It is the
-database half of a three-way split: `ecdb` owns the file on disk, `ecapi` serves
-HTTP and never creates a database, and `earl` is a client that never touches
-either. Keeping them apart means the long-running service can be installed and
-confined without carrying the ability to create a database or seed an
-administrator.
+database quarter of a four-way split: `ecdb` owns the file on disk, `ecapi`
+serves HTTP and never creates a database, and `earl` and `ec` are clients that
+never touch either. Keeping them apart means the long-running service can be
+installed and confined without carrying the ability to create a database or seed
+an administrator.
 
 ```text
 ecdb [FLAGS] <SUBCOMMAND>

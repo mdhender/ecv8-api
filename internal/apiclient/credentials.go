@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Michael D Henderson. All rights reserved.
 
-package main
+package apiclient
 
 import (
 	"encoding/json"
@@ -19,13 +19,13 @@ import (
 // The cookie value is a live session token. The server stores only its
 // fingerprint and cannot recover it, so this file is the only copy — and anyone
 // who reads it is signed in as that account until it expires. That is why the
-// file is 0600 inside a 0700 directory, and why nothing in earl ever prints
-// this field.
+// file is 0600 inside a 0700 directory, and why nothing in this package ever
+// prints this field.
 //
-// CookieName is saved with it because the server's cookie name is
-// configurable, and earl learns it from the login response rather than being
-// told. Saving it is what lets later requests send the cookie back correctly
-// without the caller having to know the name either.
+// CookieName is saved with it because the server's cookie name is configurable,
+// and a client learns it from the login response rather than being told. Saving
+// it is what lets later requests send the cookie back correctly without the
+// caller having to know the name either.
 type credential struct {
 	Cookie     string    `json:"cookie"`
 	CookieName string    `json:"cookie_name"`
@@ -33,9 +33,9 @@ type credential struct {
 }
 
 // expired reports whether the saved expiry has passed. It is advisory: the
-// server is the authority on whether a session is still good, so earl sends the
-// cookie regardless and lets a 401 be the answer. This only shapes what
-// `identities` shows.
+// server is the authority on whether a session is still good, so the cookie is
+// sent regardless and a 401 is the answer. This only shapes what Identities
+// shows.
 func (c credential) expired() bool {
 	return !c.ExpiresAt.IsZero() && time.Now().After(c.ExpiresAt)
 }
@@ -43,22 +43,28 @@ func (c credential) expired() bool {
 // credentialStore maps an API base URL to the sessions saved against it, keyed
 // by lowercased account email.
 //
-// Keying by both means earl can hold an administrator and an ordinary user for
-// the same server at once — the usual shape of exercising an authorisation
+// Keying by both means one file can hold an administrator and an ordinary user
+// for the same server at once — the usual shape of exercising an authorisation
 // boundary — and keying by base URL means a development session is never sent
 // to production.
 type credentialStore map[string]map[string]credential
 
-// credentialsPath returns the file earl saves sessions in: EARL_CREDENTIALS
-// when set, else $XDG_CONFIG_HOME/earl/<env>/credentials.json, else
-// ~/.config/earl/<env>/credentials.json.
+// credentialsPath returns the file sessions are saved in: ECV8_CREDENTIALS when
+// set, else $XDG_CONFIG_HOME/ecv8/<env>/credentials.json, else
+// ~/.config/ecv8/<env>/credentials.json.
+//
+// The directory is named for the project rather than for either command,
+// because both commands share it: `earl login` and `ec app login` write the same
+// file, so a game master signs in once and both tools are signed in. That is
+// also why the environment variable is ECV8_ and not a per-command name — two
+// tools reading two different overrides would quietly stop sharing.
 //
 // The env segment keeps environments apart, so a development session and a
 // production session cannot end up in the same file and be picked by accident.
 // os.UserConfigDir is deliberately not used: on macOS it resolves to ~/Library/
 // Application Support, which is not where a command-line tool's state belongs.
 func credentialsPath(env string) (string, error) {
-	if path := os.Getenv("EARL_CREDENTIALS"); path != "" {
+	if path := os.Getenv(EnvVarPrefix + "_CREDENTIALS"); path != "" {
 		return path, nil
 	}
 	dir := os.Getenv("XDG_CONFIG_HOME")
@@ -69,7 +75,7 @@ func credentialsPath(env string) (string, error) {
 		}
 		dir = filepath.Join(home, ".config")
 	}
-	return filepath.Join(dir, "earl", env, "credentials.json"), nil
+	return filepath.Join(dir, ConfigDirName, env, "credentials.json"), nil
 }
 
 // loadCredentials reads the store. A missing file is not an error: it yields an
@@ -97,7 +103,8 @@ func loadCredentials(path string) (credentialStore, error) {
 //
 // It writes a temporary file in the same directory and renames it, so an
 // interrupted write cannot leave a truncated file that loses every saved
-// session.
+// session. Two commands share this file, so the rename also means one of them
+// writing cannot be seen half-done by the other.
 func saveCredentials(path string, store credentialStore) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
