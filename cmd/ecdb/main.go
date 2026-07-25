@@ -2,8 +2,8 @@
 
 // Command ecdb creates and inspects the ECV8 database.
 //
-// It is the database half of what began as one binary. ecv8-api serves HTTP;
-// ecdb owns the file on disk, and is where operations that only touch storage —
+// It is the database half of a deliberate split. ecapi serves HTTP; ecdb owns
+// the file on disk, and is where operations that only touch storage —
 // creating a database today, backing one up or compacting one later — belong.
 // Keeping them out of the server means an operator can run them without a
 // server's configuration, and a mistake in one cannot take the other down.

@@ -40,12 +40,15 @@ go run ./cmd/ecapi serve --memory dev       # seeded in-memory database
 go run ./cmd/ecdb verify --db-path games/alpha
 ```
 
-Four binaries are built from this module. `cmd/ecdb` owns the database file —
-`create`, `verify`, and whatever storage-only work comes later — and takes only
-`--db-path`. `cmd/ecapi` serves HTTP and never creates a database. `cmd/earl`
-is a client. `cmd/ecv8-api` is the original binary that did both; it is
-**unchanged and will be removed whole** when the split finishes, so add nothing
-to it and do not trim it piecemeal. `air` builds `ecapi`.
+Three binaries are built from this module, and the split between them is the
+point. `cmd/ecdb` owns the database file — `create`, `verify`, and whatever
+storage-only work comes later — and takes only `--db-path`. `cmd/ecapi` serves
+HTTP and never creates a database. `cmd/earl` is a client and never touches
+either. `air` builds `ecapi`.
+
+Keep the boundaries. A command that creates a database must not also be able to
+serve one, because the long-running service is then confined to what it
+actually needs. Storage work goes in `ecdb`, not `ecapi`.
 
 **`earl` speaks HTTP and only HTTP.** It must never import `internal/store`,
 never open a database, and never implement a rule the server owns — it sends a

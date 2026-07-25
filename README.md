@@ -216,10 +216,6 @@ Its own flags read `EARL_`-prefixed variables rather than `EC_`, so pointing the
 client at another host never means touching a server's configuration. `EC_ENV`
 is shared, because a checkout has one idea of which environment it is in.
 
-`ecv8-api` is the original single binary and still does both. It is unchanged
-and will be removed whole once the split is finished, so add nothing to it —
-`ecdb` and `ecapi` are where these operations live now.
-
 `cmd/ecapi/ecapi.service` is a sample systemd unit for running `ecapi` behind
 nginx as an unprivileged `ecapi:ecapi`, with everything under one tree:
 
@@ -328,7 +324,6 @@ cmd/ecdb/              database commands: create, verify
 cmd/ecapi/             server entry point, command tree, logger construction
                        ecapi.service: sample systemd unit, installed by hand
 cmd/earl/              API client; HTTP only, no store package, no game rules
-cmd/ecv8-api/          the original single binary; unchanged until it is removed
 internal/
   cerrs/               constant sentinel errors
   config/              flags, environment, validation, precedence

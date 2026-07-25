@@ -6,7 +6,7 @@ package version
 import "fmt"
 
 // Version is the semantic version of this build.
-var Version = Semver{Major: 0, Minor: 5, Patch: 0}
+var Version = Semver{Major: 0, Minor: 6, Patch: 0}
 
 // Semver is a minimal semantic version.
 type Semver struct {
