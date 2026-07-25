@@ -263,6 +263,14 @@ func (s *Server) routes() {
 	admin.GET("/games/:gameID/memberships", s.handleListMemberships)
 	admin.PUT("/games/:gameID/memberships/:accountID", s.handleSaveMembership)
 
+	// The catalogue is not under a game because it does not depend on one: it
+	// is what this build can play. The seats are, because an agent exists only
+	// inside a game.
+	admin.GET("/agents", s.handleListAgents)
+	admin.GET("/games/:gameID/agents", s.handleListAgentSeats)
+	admin.POST("/games/:gameID/agents", s.handleCreateAgentSeat)
+	admin.PATCH("/games/:gameID/agents/:playerID", s.handleUpdateAgentSeat)
+
 	// Anything unmatched is still a Problem document rather than Echo's default
 	// JSON, so the client only ever parses one error shape.
 	e.RouteNotFound("/*", func(*echo.Context) error {

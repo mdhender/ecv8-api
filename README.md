@@ -363,6 +363,29 @@ agent cannot sign in" a fact about the schema rather than a property of some
 unusable password value, and it keeps `account` meaning exactly "a human who can
 sign in".
 
+**Which agents exist is a property of the binary, not of the database.** The
+catalogue lives in `internal/engine` (`agents.go`) and is served from there, so
+adding an agent is one commit — write the code, add it to the list — with no
+migration and no second artefact to forget. A seat stores `agent_key`, and the
+schema constrains that key's *format* and deliberately not the set of valid
+keys: that set changes with every release, and enumerating it in a `CHECK` would
+mean a migration per agent.
+
+The rejected alternative was an `agent` table populated by a migration whenever
+agent code was committed. Migrations here are forward-only, so a rollback would
+leave the database advertising an agent the running binary cannot play, and the
+failure would surface at turn resolution rather than at deploy. A foreign key
+onto such a table looks like integrity, but its parent row is only an assertion
+that some code exists — SQLite cannot check the thing that actually matters.
+The registry can, at seat time, and the listing reports a stranded seat as
+`playable: false` instead of hiding it.
+
+If the same code ever needs to run at different settings — "Aggressive (hard)"
+and "Aggressive (easy)" both dispatching to `aggressive` — that is an
+`agent_profile` table, and it *is* legitimately database-resident: it would be
+data a game master curates rather than a manifest of what the binary contains.
+It does not exist yet and should not be built before the tuning it would hold.
+
 Both domains live in one SQLite file, so the separation is a discipline rather
 than something the storage enforces. The compensation is composite foreign keys,
 which turn rules that would otherwise live in Go into things SQLite checks: a
@@ -385,6 +408,8 @@ migrations applied to it.
 - `0001_initial.sql` — the application domain.
 - `0002_engine.sql` — the engine domain, and the rebuild of `game_account_role`
   into `game_player`.
+- `0003_agent_key.sql` — `agent_key` on a seat, naming the implementation that
+  plays it.
 
 - Writable opens migrate forward automatically.
 - Read-only opens never migrate.
@@ -615,12 +640,33 @@ All require an administrator who is **not** impersonating.
 | `POST` | `/admin/games` | Create. |
 | `GET` | `/admin/games/{id}` | One game. |
 | `PATCH` | `/admin/games/{id}` | Rename, or deactivate via `is_active`. |
-| `GET` | `/admin/games/{id}/memberships` | The roster. |
+| `GET` | `/admin/games/{id}/memberships` | The roster of **human** seats. |
 | `PUT` | `/admin/games/{id}/memberships/{accountId}` | Add or update a membership (`is_gm`, `is_active`). |
+| `GET` | `/admin/agents` | The agents **this build** can play. Reads no database. |
+| `GET` | `/admin/games/{id}/agents` | The agents seated in a game. |
+| `POST` | `/admin/games/{id}/agents` | Seat one (`agent_key`, optional `agent_name`, `is_active`). |
+| `PATCH` | `/admin/games/{id}/agents/{playerId}` | Rename or deactivate a seated agent. |
 
 Guards that return `409`: deactivating the last active administrator,
 deactivating your own account, revoking your own sessions, promoting an account
-that belongs to a game, and assigning an administrator to a game.
+that belongs to a game, assigning an administrator to a game, and seating an
+agent in an inactive game.
+
+`POST /admin/games/{id}/agents` is a POST rather than a PUT because a seat is
+not identified by its path: several agents may play one game, and seating the
+same implementation twice legitimately produces two players. `agent_key` is
+validated against `GET /admin/agents` and a bad one returns `422` listing the
+valid keys. It is not updatable and `PATCH` rejects it outright — the key is
+what the engine dispatches on and is written into a game's state, so changing it
+would hand a faction to different code mid-game. Retiring an agent means
+deactivating its seat and adding another; as everywhere else, there is no
+`DELETE`.
+
+Each seat carries `playable`, which is computed rather than stored: it reports
+whether this build still has the implementation the seat names. A database
+written by a later release can hold a key this binary does not know, and a game
+master should see that in the listing rather than discover it when a turn is
+resolved.
 
 ### Health
 
@@ -775,7 +821,17 @@ go test ./...              # see Tests, below, for what is covered
 go test ./...
 ```
 
-**The database commands are tested; nothing else is yet.**
+Covered today:
+
+| Suite | What it protects |
+|-------|------------------|
+| `cmd/ecdb/main_test.go` | The database commands: what each prints, refuses, and leaves on disk. |
+| `internal/engine/agents_test.go` | The agent catalogue's invariants — keys unique, storable, and exactly reported. |
+| `internal/store/agents_test.go` | Agent seats, and the schema constraints that hold whatever code writes a row. |
+| `internal/server/handlers_admin_agents_test.go` | The agent endpoints: statuses, validation, scoping, and authorisation. |
+
+### The database commands
+
 `cmd/ecdb/main_test.go` drives `run` with real arguments — the same entry point
 `main` uses — and asserts what each subcommand prints, what it refuses, and what
 it leaves on disk. It reaches past the command only to inspect a database, never
@@ -797,6 +853,29 @@ They use the standard library only, and each one builds its own database under
 `t.TempDir()`. Every `EC_`-prefixed variable is cleared for the duration of a
 test, so a developer's own `EC_DB_PATH` cannot decide what is being run.
 
-The rest of the service has no tests. The generated placeholders were removed
-rather than kept as meaningless green checks, and nothing else has been added
-speculatively. When another area is covered, this section is the place to say so.
+### Agents
+
+The agent suites follow the same principle one layer up: they exercise the real
+thing rather than a stand-in. The store tests run against a migrated in-memory
+database, so a rule the schema enforces is tested by attempting the write and
+requiring SQLite to refuse it — an agent with no key, a malformed key, an agent
+made game master, a seat that is half human and half agent. The handler tests
+drive the real router with real requests and authenticate through a genuine
+session cookie, so a change that broke authorisation fails there too.
+
+What they hold:
+
+- The served catalogue is the engine's, exactly, and never anything stored.
+- An unknown `agent_key` is a `422` that names the valid keys, and a key is
+  normalised before it is stored so one agent cannot enter under two spellings.
+- `agent_key` cannot be changed on an existing seat.
+- A seat id from one game cannot reach another game's seat.
+- Agents and memberships stay separate listings in both directions.
+- Several agents may share a game, and human and agent seats draw `player_id`
+  from one sequence.
+
+### What is not covered
+
+Accounts, sessions, activation, games, and the rest of the endpoints have no
+tests. The generated placeholders were removed rather than kept as meaningless
+green checks. Adding coverage needs no permission — when you do, list it above.

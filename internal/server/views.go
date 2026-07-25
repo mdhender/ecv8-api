@@ -5,6 +5,7 @@ package server
 import (
 	"time"
 
+	"github.com/mdhender/ecv8-api/internal/engine"
 	"github.com/mdhender/ecv8-api/internal/store"
 )
 
@@ -180,6 +181,66 @@ func newMembershipView(m *store.Membership) membershipView {
 		IsActive:    m.IsActive,
 		CreatedAt:   m.CreatedAt,
 		UpdatedAt:   m.UpdatedAt,
+	}
+}
+
+// agentView is one agent this build can play, as offered to a game master
+// choosing one.
+//
+// It is rendered from an engine.Descriptor rather than from a database row,
+// because which agents exist is a property of this binary. A catalogue read
+// from the database could advertise an agent the running code cannot play.
+type agentView struct {
+	Key         string `json:"key"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// newAgentView renders one entry of the engine's catalogue.
+func newAgentView(d engine.Descriptor) agentView {
+	return agentView{
+		Key:         d.Key,
+		Name:        d.Name,
+		Description: d.Description,
+	}
+}
+
+// agentSeatView is an agent seated in a game.
+//
+// player_id is on the wire because it is the identity the engine uses, and a
+// game master looking at engine output needs to be able to match a faction's
+// controller to a seat. It is the seat's row id; there is no separate account.
+type agentSeatView struct {
+	PlayerID  int64  `json:"player_id"`
+	GameID    int64  `json:"game_id"`
+	GameName  string `json:"game_name"`
+	AgentKey  string `json:"agent_key"`
+	AgentName string `json:"agent_name"`
+	IsActive  bool   `json:"is_active"`
+	// Playable reports whether this build still has the implementation the
+	// seat names. It is computed, not stored: a database written by another
+	// release can hold a key this binary does not know, and a game master
+	// should see that in the listing rather than discover it at turn
+	// resolution.
+	Playable  bool      `json:"playable"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// newAgentSeatView renders a seated agent, resolving its key against this
+// build's catalogue.
+func newAgentSeatView(s *store.AgentSeat) agentSeatView {
+	_, playable := engine.AgentByKey(s.AgentKey)
+	return agentSeatView{
+		PlayerID:  s.ID,
+		GameID:    s.GameID,
+		GameName:  s.GameName,
+		AgentKey:  s.AgentKey,
+		AgentName: s.AgentName,
+		IsActive:  s.IsActive,
+		Playable:  playable,
+		CreatedAt: s.CreatedAt,
+		UpdatedAt: s.UpdatedAt,
 	}
 }
 

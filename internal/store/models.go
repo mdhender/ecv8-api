@@ -70,6 +70,27 @@ type Membership struct {
 	UpdatedAt   time.Time
 }
 
+// AgentSeat is a seat played by the engine rather than by a person. It has no
+// account: that is what makes "an agent cannot sign in" a fact about the
+// schema rather than a property of some unusable credential.
+//
+// AgentKey names the implementation that plays it. Whether this build has that
+// implementation is a question only internal/engine can answer, so the store
+// reads and writes the key without judging it.
+type AgentSeat struct {
+	// ID is the seat's row id, which is the engine's player_id — the same
+	// identity space human seats draw from, because the engine must not care
+	// which kind it is dealing with.
+	ID        int64
+	GameID    int64
+	GameName  string
+	AgentKey  string
+	AgentName string
+	IsActive  bool
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 // Session is a server-side authenticated session. The cookie value itself is
 // never stored; only its fingerprint is.
 type Session struct {

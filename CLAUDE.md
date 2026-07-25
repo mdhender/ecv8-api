@@ -102,18 +102,30 @@ builds, installs, or reads it, and deployment automation stays out of scope.
 **`gofmt -l . && go build ./... && go vet ./... && go test ./...` are the
 checks.** Run all four after any change and report the real output.
 
-**Only the database commands are tested** (`README.md` § Tests). The suite is
-`cmd/ecdb/main_test.go`, and it drives `run` with real arguments rather than
-calling handlers directly, because the contract worth protecting is the
-command's: what it prints, what it refuses, and what it leaves on disk. Standard
-library only — no assertion package — and each test builds its own database
-under `t.TempDir()` with `isolateEnv` clearing every `EC_` variable first.
+**Tests are welcome.** Add them where they earn their keep, without asking
+first. `README.md` § Tests lists what is covered today; keep it current in the
+same change that changes coverage.
 
-The rest of the service is deliberately untested for now. **Do not add `_test.go`
-placeholders** or reintroduce the generated test files that were removed, and do
-not add tests for an area the user has not asked to cover. When a new area is
-covered, say so in `README.md` § Tests in the same change. A new `ecdb`
-subcommand, though, is expected to bring a test with it.
+What the existing suites have in common, and what a new one should match:
+
+- **Standard library only.** No assertion package, no mocking framework, no
+  fixtures loaded from disk. `t.Errorf` with "got X, want Y" is the house style.
+- **Test the contract, not the implementation.** `cmd/ecdb/main_test.go` drives
+  `run` with real arguments the way a shell does, because what is worth
+  protecting is what the command prints, what it refuses, and what it leaves on
+  disk. Reach past the surface only to inspect a result, never to arrange a
+  state the surface could have arranged itself.
+- **Every test builds its own database.** `t.TempDir()` for a persistent one,
+  `store.OpenTemporaryStore` with a name derived from `t.Name()` for an
+  in-memory one. Nothing is shared between tests, and `isolateEnv` clears every
+  `EC_` variable before a command test runs.
+- **Assert on what the schema guarantees.** A constraint that exists to make a
+  rule true regardless of the code path is worth a test that tries the code path
+  and expects failure.
+
+Still off the table: `_test.go` placeholders, tests that assert nothing, and
+reintroducing the generated test files that were removed. A new `ecdb`
+subcommand is expected to bring a test with it.
 
 **Go 1.26.4 is pinned exactly**, and `go.mod` declares it. If the local
 toolchain disagrees, stop and report the mismatch — do not edit the `go` line,
@@ -278,6 +290,18 @@ bcrypt's parser rejecting a malformed value, and needs a fabricated email and
 activation timestamp to get past `0001`'s CHECKs. `account` means exactly "a
 human who can sign in", and it should stay that way.
 
+**The agent catalogue is code, not data.** `internal/engine/agents.go` holds an
+explicit list of every agent this build can play, and `GET /admin/agents` serves
+it. A seat stores `agent_key`; the schema checks that key's *format* and never
+the set of valid keys, because that set changes with every release.
+
+Do not add an `agent` table populated by a migration. Migrations here are
+forward-only, so a rollback would leave the database offering an agent the
+binary cannot play, and a foreign key onto such a table checks only that
+somebody once asserted the code existed. `engine.AgentByKey` is the authority
+and is asked at seat time; a seat naming a missing implementation is reported as
+`playable: false` rather than hidden or fatal.
+
 **Cross-domain rules are composite foreign keys, not Go.** `faction` carries a
 redundant `player_is_gm`, and the seat carries a redundant `account_role`, so
 that "a GM never controls a faction" and "an admin never holds a seat" are
@@ -288,6 +312,24 @@ settle for a check in a handler. `0002_engine.sql` explains each one.
 Deleting is still not a thing. Engine tables use `ON DELETE RESTRICT` rather
 than the `CASCADE` the application tables use, so a delete that should never
 happen fails loudly instead of taking a game's state with it.
+
+## Adding an agent
+
+One commit, and no migration:
+
+1. Write the implementation in `internal/engine`.
+2. Add a `Descriptor` to the `agents` list in `agents.go`, next to it.
+3. `gofmt -l . && go build ./... && go vet ./... && go test ./...`.
+
+That is the whole procedure. `GET /admin/agents` picks it up, and a game master
+can seat it immediately.
+
+**A key that has shipped is permanent.** It is written onto seats and into a
+game's state, so renaming one orphans every seat that referenced it — those
+seats report `playable: false` and cannot be resolved. `Name` and `Description`
+are display strings and may be reworded freely; `Key` may not. Withdrawing an
+agent means removing it from the list and accepting that existing seats become
+unplayable, which is visible in the listing and is the intended behaviour.
 
 ## Adding a migration
 
