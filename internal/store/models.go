@@ -193,6 +193,30 @@ func parseTime(s string) (time.Time, error) {
 	return t, nil
 }
 
+// A game's PCG seed is two uint64 words, and SQLite's INTEGER is a *signed*
+// 64-bit value. There is no unsigned column type to reach for and no wider one
+// to hide in, so the two words are stored as the signed integers with the same
+// bits — which means a seed word at or above 2^63 is on disk as a negative
+// number.
+//
+// That is not corruption and must not be "fixed". Go defines a conversion
+// between integer types of the same size as a reinterpretation of the bits, so
+// the round trip through int64 and back is exact for every value a uint64 can
+// hold, including the whole upper half. Clamping, or widening to TEXT to keep
+// the number looking positive, would each cost more than the confusion they
+// save: a seed that does not round-trip exactly makes a game unreplayable,
+// which is the one property internal/engine exists to guarantee.
+//
+// These two functions are the only place the conversion happens. Nothing in a
+// handler and nothing in the engine should ever cast a seed itself — that is
+// how one path acquires a subtly different rule from another.
+
+// formatSeed renders a seed word for storage.
+func formatSeed(word uint64) int64 { return int64(word) }
+
+// parseSeed reads a stored seed word.
+func parseSeed(stored int64) uint64 { return uint64(stored) }
+
 // boolToInt converts a Go bool to SQLite's 0/1 representation.
 func boolToInt(b bool) int64 {
 	if b {

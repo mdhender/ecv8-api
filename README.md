@@ -828,6 +828,7 @@ Covered today:
 | `cmd/ecdb/main_test.go` | The database commands: what each prints, refuses, and leaves on disk. |
 | `internal/engine/agents_test.go` | The agent catalogue's invariants — keys unique, storable, and exactly reported. |
 | `internal/store/agents_test.go` | Agent seats, and the schema constraints that hold whatever code writes a row. |
+| `internal/store/seed_test.go` | A PCG seed's round trip through SQLite's signed `INTEGER`. |
 | `internal/server/handlers_admin_agents_test.go` | The agent endpoints: statuses, validation, scoping, and authorisation. |
 
 ### The database commands
@@ -873,6 +874,22 @@ What they hold:
 - Agents and memberships stay separate listings in both directions.
 - Several agents may share a game, and human and agent seats draw `player_id`
   from one sequence.
+
+### Seeds
+
+A game's PCG seed is two `uint64` words and SQLite's `INTEGER` is signed, so a
+word at or above 2^63 is stored as a negative number. That is exact — Go defines
+a conversion between integer types of the same size as a reinterpretation of the
+bits — but it looks like corruption in a SQLite shell, and the obvious "fix" is
+to clamp it.
+
+`seed_test.go` is there to make that fix fail. It checks the round trip at both
+ends of the range and at the 2^63 boundary, asserts that distinct seeds stay
+distinct on disk, and writes the values through a real database rather than only
+through Go's type system — a column that promoted a large value to `REAL` would
+pass every in-memory check and lose the low bits. A seed that does not
+round-trip exactly makes a game unreplayable, which is the one property
+`internal/engine` exists to guarantee.
 
 ### What is not covered
 
