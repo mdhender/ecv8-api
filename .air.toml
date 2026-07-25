@@ -6,8 +6,8 @@ root = "."
 tmp_dir = "tmp"
 
 [build]
-  cmd = "go build -o ./tmp/ecv8-api ./cmd/ecv8-api"
-  bin = "./tmp/ecv8-api"
+  cmd = "go build -o ./tmp/ecapi ./cmd/ecapi"
+  bin = "./tmp/ecapi"
   args_bin = ["serve"]
   delay = 1000
   exclude_dir = [".git", ".idea", "data", "dist", "tmp"]

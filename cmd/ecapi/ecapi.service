@@ -1,0 +1,196 @@
+# Copyright (c) 2026 Michael D Henderson. All rights reserved.
+#
+# Sample systemd unit for the ECV8 API server. It is a starting point to copy
+# and adapt, not something the build installs: deployment stays an operator's
+# decision, so nothing in this repository reads or ships this file.
+#
+# It assumes the layout below. Change the paths together if you change any of
+# them, because ProtectSystem=strict and StateDirectory= depend on them.
+#
+#   /opt/ecv8/bin/ecapi      the server binary
+#   /opt/ecv8/bin/ecdb       the database binary; only ever run by hand
+#   /opt/ecv8/app/           the built Ember client, served by nginx directly;
+#                            this service never reads it
+#   /var/lib/ecv8/ecv8.db    the database, with its -wal and -shm sidecars
+#   /etc/ecv8/ecapi.env      configuration, including anything secret
+#
+# The state directory is the only path the service may write, and the whole of
+# /opt is read-only to it. A compromised process therefore cannot rewrite the
+# program that will run at next start.
+#
+# Install:
+#
+#   sudo useradd --system --no-create-home --home-dir /opt/ecv8 \
+#        --shell /usr/sbin/nologin ecapi
+#   sudo install -d -o root -g root -m 0755 /opt/ecv8 /opt/ecv8/bin
+#   sudo install -o root -g root -m 0755 ecapi ecdb /opt/ecv8/bin/
+#   sudo install -d -o root -g ecapi -m 0750 /etc/ecv8
+#   sudo install -o root -g ecapi -m 0640 /dev/null /etc/ecv8/ecapi.env
+#
+# The client is nginx's to serve; it needs to be readable by nginx and by
+# nobody in particular otherwise:
+#
+#   sudo install -d -o root -g root -m 0755 /opt/ecv8/app
+#
+# Create the database before the first start. The store never creates a
+# directory, and StateDirectory= below does not exist until the unit has run
+# once, so the directory is made here and systemd adopts it afterwards. This is
+# also the only moment an administrator can be seeded:
+#
+#   sudo install -d -o ecapi -g ecapi -m 0750 /var/lib/ecv8
+#   sudo -u ecapi EC_ENV=production \
+#        EC_ADMIN_EMAIL=admin@example.com EC_ADMIN_SECRET='a real secret' \
+#        /opt/ecv8/bin/ecdb create --db-path /var/lib/ecv8
+#
+#   sudo install -o root -g root -m 0644 ecapi.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ecapi.service
+#   journalctl -u ecapi -f
+#
+# Upgrading, with the maintenance sentinel described under [Unit] below. The
+# sentinel goes up first and comes down last, so nothing — a reboot, another
+# administrator, a restart — can start a half-updated service in between:
+#
+#   sudo touch /etc/ecv8/maintenance
+#   sudo systemctl stop ecapi
+#   sudo install -o root -g root -m 0755 ecapi ecdb /opt/ecv8/bin/
+#   sudo -u ecapi /opt/ecv8/bin/ecdb verify --db-path /var/lib/ecv8
+#   sudo rm /etc/ecv8/maintenance
+#   sudo systemctl start ecapi
+#
+# `ecdb verify` is read-only and reports the migration the database is at
+# against the migration this binary knows. It is worth running before starting:
+# a database ahead of the binary is refused for writing, and finding that out
+# during the window is much better than finding it out afterwards. The server
+# migrates forward on open, so a database behind the binary needs nothing.
+#
+# /etc/ecv8/ecapi.env holds one KEY=value per line, no `export`, no quoting
+# performed by the shell. At minimum:
+#
+#   EC_PUBLIC_BASE_URL=https://ec.example.com
+#
+# That one matters more than it looks: activation links are built from it, and
+# a value that does not match what users actually type — including the port —
+# produces links that look right and lead nowhere. EC_ADMIN_EMAIL and
+# EC_ADMIN_SECRET belong nowhere near this file; opening an existing database
+# ignores them, so they would be a stored secret with no effect.
+#
+# nginx is a separate unit and this one deliberately declares no ordering
+# against it. nginx starting first simply returns 502 until the API is up,
+# which is the correct behaviour during a restart; coupling the two would only
+# mean a failed API could keep every other site on the host from being served.
+# nginx terminates TLS, serves /opt/ecv8/app, and proxies /api to the loopback
+# listener below, so this process never sees a certificate and never needs a
+# privileged port.
+
+[Unit]
+Description=ECV8 API server
+Documentation=https://github.com/mdhender/ecv8-api
+
+# Maintenance mode. While this file exists the unit will not start: systemd
+# reports the condition as unmet and skips the job, which is a success, not a
+# failure — so a maintenance window does not leave a `failed` unit behind for
+# someone to misread as an outage.
+#
+# It is checked whenever a start is attempted, which is what makes it worth
+# having: a reboot part-way through an upgrade, or a colleague running
+# `systemctl start`, cannot bring a half-updated service back up. It is not
+# checked while the process is running, so it stops a service starting, never a
+# service already started. Stop the service explicitly as well.
+ConditionPathExists=!/etc/ecv8/maintenance
+# The listener is loopback-only, so a routable address is not needed and
+# network-online.target would delay startup for nothing.
+After=network.target
+
+# Restart=on-failure below retries every 5s, and the default rate limit of five
+# starts in 10s never trips at that spacing. Without a wider window a
+# permanently broken configuration — a database that is not there, a
+# --public-base-url that will never validate — would restart every five seconds
+# forever and bury the reason in the journal. Sixty seconds means it gives up
+# after five tries and sits in `failed`, where an operator can see it.
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Service]
+# exec, not simple: startup counts as failed if the binary cannot be executed,
+# rather than the unit reporting success and then vanishing. The server does
+# not implement sd_notify, so Type=notify would hang until it timed out.
+Type=exec
+User=ecapi
+Group=ecapi
+ExecStart=/opt/ecv8/bin/ecapi serve
+# Dotenv files are read from the working directory. There are none in
+# /opt/ecv8, and there should not be: configuration belongs in the environment
+# file below, where systemd owns its permissions.
+WorkingDirectory=/opt/ecv8
+
+# EC_ENV is set because it labels every log line and must not read
+# "development" in production.
+Environment=EC_ENV=production
+Environment=EC_DB_PATH=/var/lib/ecv8
+Environment=EC_LISTEN_ADDR=127.0.0.1:3000
+Environment=EC_LOG_FORMAT=json
+# nginx runs on this host and reaches the API over the loopback interface, so
+# its X-Forwarded-For may be believed and request logs show the real client
+# rather than 127.0.0.1. Trust is per-hop and this is the only hop: add
+# ::1/128 as well if nginx proxies to the IPv6 loopback, and nothing else
+# unless another proxy genuinely sits in front.
+Environment=EC_TRUSTED_PROXY=127.0.0.1/32
+# Listed last so its assignments win over the defaults above. The leading '-'
+# makes a missing file non-fatal.
+EnvironmentFile=-/etc/ecv8/ecapi.env
+
+# Creates and owns /var/lib/ecv8, and is the one path this service may write.
+# ProtectSystem=strict makes everything else read-only, /opt included, so the
+# binaries are out of reach of the process that runs them.
+StateDirectory=ecv8
+StateDirectoryMode=0750
+# The database is created 0600; this keeps the WAL sidecars just as private.
+UMask=0077
+
+# SIGTERM is what the server treats as "shut down gracefully", so the stop
+# timeout must exceed --shutdown-timeout (20s by default) or systemd will kill
+# connections the server was still draining.
+KillSignal=SIGTERM
+TimeoutStopSec=45s
+Restart=on-failure
+RestartSec=5s
+
+# slog writes to stderr, so the journal is the log. There is no log file and
+# nothing to rotate.
+StandardOutput=journal
+StandardError=journal
+
+# Confinement. The service binds a loopback port, reads its binary, and writes
+# one directory; it needs nothing else, so everything else is taken away.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# Safe here because the SQLite engine is compiled in through ZombieZen and this
+# module is CGO-free: nothing generates executable pages at runtime.
+MemoryDenyWriteExecute=true
+# AF_UNIX is kept for the journal socket and local resolver paths; the API
+# itself only needs TCP.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

@@ -1,4 +1,5 @@
 # Build output
+/ecapi
 /ecdb
 /ecv8-api
 /bin/

@@ -56,7 +56,7 @@ EC_ADMIN_EMAIL=admin@example.com EC_ADMIN_SECRET='choose-a-good-secret' \
   go run ./cmd/ecdb create --db-path db
 
 # 3. Serve it.
-go run ./cmd/ecv8-api serve --db-path db
+go run ./cmd/ecapi serve --db-path db
 
 # 4. Check it is alive.
 curl -s localhost:3000/api/v1/health/ready
@@ -70,7 +70,7 @@ To work on the frontend without a database on disk, run against a seeded
 in-memory database instead:
 
 ```bash
-go run ./cmd/ecv8-api serve --memory dev
+go run ./cmd/ecapi serve --memory dev
 ```
 
 That gives you four accounts — `admin@example.com/admin`, `gm1@example.com/gm1`,
@@ -108,7 +108,7 @@ Flags map to environment variables by upper-casing and prefixing with `EC_`:
 ### Options
 
 `ecdb` accepts `--db-path` and nothing else. Every other flag below belongs to
-`ecv8-api`.
+`ecapi`.
 
 | Flag | Env | Default | Meaning |
 |------|-----|---------|---------|
@@ -147,16 +147,17 @@ a silent authentication failure rather than an obvious one:
 
 ## Commands
 
-Two binaries are built from this module. **`ecdb` owns the database file**;
-`ecv8-api` serves HTTP.
+**`ecdb` owns the database file. `ecapi` serves HTTP.** They are separate
+binaries so the long-running service can be installed and confined without
+carrying the ability to create a database or seed an administrator.
 
 ```
 ecdb create                       create ecv8.db and seed the initial admin
 ecdb verify                       open ecv8.db read-only and print its migration
 ecdb version                      print the build version
 
-ecv8-api serve                    open the database and serve the HTTP API
-ecv8-api version                  print the build version
+ecapi serve                       open the database and serve the HTTP API
+ecapi version                     print the build version
 ```
 
 Every command accepts `--help`, which lists the flags in scope with their
@@ -164,10 +165,22 @@ defaults. `ecdb` takes only `--db-path`: a command that never opens a listener
 should not accept `--listen-addr`, nor be refused for a `--public-base-url` it
 would never use.
 
-`ecv8-api db create` and `ecv8-api db verify` still exist and still work. They
-are the previous home of these two operations, kept while the split is in
-progress; `ecdb` is where they live now and where `backup` and `compact` will be
-added.
+`ecv8-api` is the original single binary and still does both. It is unchanged
+and will be removed whole once the split is finished, so add nothing to it —
+`ecdb` and `ecapi` are where these operations live now.
+
+`cmd/ecapi/ecapi.service` is a sample systemd unit for running `ecapi` behind
+nginx as an unprivileged `ecapi:ecapi`, with everything under one tree:
+
+```
+/opt/ecv8/bin/   ecapi and ecdb, root-owned and read-only to the service
+/opt/ecv8/app/   the built Ember client, served by nginx; the API never reads it
+/var/lib/ecv8/   the database — a systemd StateDirectory, and the one path the
+                 service may write
+```
+
+It is a starting point to copy, not something the build installs — deployment
+stays an operator's decision, and nothing in this repository reads it.
 
 ---
 
@@ -261,7 +274,9 @@ Not automated, and deliberately so. A few things worth knowing:
 
 ```
 cmd/ecdb/              database commands: create, verify
-cmd/ecv8-api/          server entry point, command tree, logger construction
+cmd/ecapi/             server entry point, command tree, logger construction
+                       ecapi.service: sample systemd unit, installed by hand
+cmd/ecv8-api/          the original single binary; unchanged until it is removed
 internal/
   cerrs/               constant sentinel errors
   config/              flags, environment, validation, precedence
@@ -555,7 +570,7 @@ when you want one that starts and stops with the project. It serves plain HTTP o
 ```bash
 caddy run --config dev/Caddyfile
 
-go run ./cmd/ecv8-api serve --db-path db \
+go run ./cmd/ecapi serve --db-path db \
   --cookie-secure=false --public-base-url http://localhost:8081
 ```
 

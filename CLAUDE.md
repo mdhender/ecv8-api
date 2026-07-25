@@ -36,14 +36,19 @@ gofmt -l .            # no output means formatted
 go build ./...
 go vet ./...          # these three are the checks — run all of them
 air                   # live reload; config in .air.toml, binaries in tmp/
-go run ./cmd/ecv8-api serve --memory dev    # seeded in-memory database
+go run ./cmd/ecapi serve --memory dev       # seeded in-memory database
 go run ./cmd/ecdb verify --db-path games/alpha
 ```
 
-Two binaries are built from this module. `cmd/ecdb` owns the database file —
+Three binaries are built from this module. `cmd/ecdb` owns the database file —
 `create`, `verify`, and whatever storage-only work comes later — and takes only
-`--db-path`. `cmd/ecv8-api` serves HTTP. `ecv8-api db create|verify` still works
-and is the previous home of those two operations; add nothing to it.
+`--db-path`. `cmd/ecapi` serves HTTP and never creates a database.
+`cmd/ecv8-api` is the original binary that did both; it is **unchanged and will
+be removed whole** when the split finishes, so add nothing to it and do not
+trim it piecemeal. `air` builds `ecapi`.
+
+`cmd/ecapi/ecapi.service` is a sample systemd unit, documentation only. Nothing
+builds, installs, or reads it, and deployment automation stays out of scope.
 
 **There are no tests, by design** (`README.md` § Tests). `gofmt -l . && go build
 ./... && go vet ./...` are the checks. Run all three after any change and report

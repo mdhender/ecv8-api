@@ -16,7 +16,7 @@
 #
 #   caddy run --config dev/Caddyfile
 #
-#   ecv8-api serve --cookie-secure=false \
+#   ecapi serve --cookie-secure=false \
 #     --public-base-url http://localhost:8081
 #
 # Then browse http://localhost:8081. Do not browse http://localhost:4200
@@ -25,7 +25,7 @@
 # Ports
 #   8081  Caddy, the only origin a browser should use
 #   4200  Ember dev server (pnpm start in ../app)
-#   3000  Go API (ecv8-api serve)
+#   3000  Go API (ecapi serve)
 #
 # 8081 is used because 8080 is commonly already taken. If you move it, change
 # the site address below and EC_PUBLIC_BASE_URL together.
