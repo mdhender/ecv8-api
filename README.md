@@ -53,7 +53,7 @@ mkdir -p db
 
 # 2. Create ecv8.db and seed the first administrator.
 EC_ADMIN_EMAIL=admin@example.com EC_ADMIN_SECRET='choose-a-good-secret' \
-  go run ./cmd/ecdb create --db-path db
+  go run ./cmd/ecdb database create --db-path db
 
 # 3. Serve it.
 go run ./cmd/ecapi serve --db-path db
@@ -107,12 +107,13 @@ Flags map to environment variables by upper-casing and prefixing with `EC_`:
 
 ### Options
 
-`ecdb` accepts `--db-path` and nothing else. Every other flag below belongs to
-`ecapi`.
+`ecdb` accepts `--db-path` and `--quiet`, and nothing else. Every other flag
+below belongs to `ecapi`.
 
 | Flag | Env | Default | Meaning |
 |------|-----|---------|---------|
 | `--db-path` | `EC_DB_PATH` | `db` | Directory holding `ecv8.db`. Must exist. |
+| `--quiet` | `EC_QUIET` | `false` | `ecdb` only. Suppress status lines. A value a command was asked for — a path, a version — is still printed. |
 | `--memory` | `EC_MEMORY` | *(unset)* | Serve a seeded in-memory database instead. Development only. |
 | `--read-only` | `EC_READ_ONLY` | `false` | Open SQLite read-only. Write endpoints fail. |
 | `--listen-addr` | `EC_LISTEN_ADDR` | `127.0.0.1:3000` | Private HTTP listener. |
@@ -153,8 +154,12 @@ without carrying the ability to create a database or seed an administrator, and
 so the client has no way to reach the database at all.
 
 ```
-ecdb create                       create ecv8.db and seed the initial admin
-ecdb verify                       open ecv8.db read-only and print its migration
+ecdb database create              create ecv8.db and seed the initial admin
+ecdb database verify              open ecv8.db read-only and print its migration
+ecdb database version             print ecv8.db's migration number, and nothing else
+ecdb database upgrade             apply any migrations ecv8.db is missing
+ecdb database backup              write a consistent, compacted copy of ecv8.db
+ecdb database compact             reclaim unused space in ecv8.db
 ecdb version                      print the build version
 
 ecapi serve                       open the database and serve the HTTP API
@@ -167,9 +172,20 @@ earl version                      print the build version
 ```
 
 Every command accepts `--help`, which lists the flags in scope with their
-defaults. `ecdb` takes only `--db-path`: a command that never opens a listener
-should not accept `--listen-addr`, nor be refused for a `--public-base-url` it
-would never use.
+defaults. `ecdb` takes only `--db-path` and `--quiet`: a command that never
+opens a listener should not accept `--listen-addr`, nor be refused for a
+`--public-base-url` it would never use.
+
+### ecdb
+
+Everything that touches the file sits under `database`, so what is a database
+operation and what is not stays obvious — `ecdb version` reports the build and
+opens nothing, while `ecdb database version` opens `ecv8.db` and reports the
+schema.
+
+**Every subcommand is documented in [`cmd/ecdb/README.md`](cmd/ecdb/README.md)**:
+what each one prints, what it refuses, the initial-administrator variables, the
+backup procedure, and why `backup` and `compact` never migrate.
 
 ### earl
 
@@ -240,7 +256,7 @@ but cannot accidentally create a second database under a different name.
 
 ### Creating and opening
 
-`ecdb create` creates the file. It fails if `ecv8.db` already exists — an
+`ecdb database create` creates the file. It fails if `ecv8.db` already exists — an
 existing database is never truncated, replaced, or reopened as if it were new.
 The directory must already exist; **the store never creates a directory**, and it
 rejects an empty path, a missing path, a path that is not a directory, and a
@@ -252,12 +268,18 @@ creation never reaches initialisation when one exists.
 
 Opening is separate and never creates anything:
 
-- **Writable** (`serve`): the application marker is checked, pending migrations
-  are applied automatically, and WAL is asserted. A database *newer* than the
-  binary is rejected without being modified.
-- **Read-only** (`ecdb verify`, `serve --read-only`): SQLite is opened in genuine
-  read-only mode. No migration runs and nothing is written, so a database newer
-  than the binary is perfectly acceptable — an older build can still inspect it.
+- **Writable** (`serve`, `ecdb database upgrade`): the application marker is
+  checked, pending migrations are applied automatically, and WAL is asserted. A
+  database *newer* than the binary is rejected without being modified.
+- **Writable without migrating** (`ecdb database compact`): as above, but the
+  database is left at whatever level it is on and the command refuses unless
+  that is this binary's level. VACUUM must never be the thing that changes a
+  schema.
+- **Read-only** (`ecdb database verify`, `ecdb database version`,
+  `ecdb database backup`, `serve --read-only`): SQLite is opened in genuine
+  read-only mode. No migration runs and the database itself is never written, so
+  one newer than the binary is perfectly acceptable — an older build can still
+  inspect it. `backup` writes only the new file it creates.
 
 `PRAGMA application_id` is the authoritative marker that a file was created by
 ECV8. Its value is `0x65637638` (`1701017144`), the four ASCII bytes of `ecv8`.
@@ -276,51 +298,41 @@ migrations applied to it.
 - A database ahead of the binary is refused for writing. Deploy the newer binary
   or restore an older snapshot; there is no downgrade path.
 
-There is no separate upgrade utility. `serve` migrates on open, which is what
-keeps the running binary and the schema in step.
+`serve` migrates on open, which is what keeps the running binary and the schema
+in step, so nothing has to be run before a deploy. An operator who would rather
+migrate deliberately — at a chosen moment, before the new binary starts, or
+against a restored backup — uses `ecdb database upgrade` instead of being forced
+to launch a server to do it. See
+[`cmd/ecdb/README.md`](cmd/ecdb/README.md#upgrading-a-database).
 
 ### The initial administrator
 
-`ecdb create` is the **only** operation that may seed an administrator, and it
-reads exactly two variables:
-
-- `EC_ADMIN_EMAIL`
-- `EC_ADMIN_SECRET`
-
-They are validated *before* the database file is created:
-
-| Both unset or blank | Database is created with no administrator. |
-|---------------------|--------------------------------------------|
-| Exactly one set     | **Error.** Nothing is created. |
-| Both set            | Validated, then one active administrator is created during initialisation. |
-
-Opening an existing database ignores these variables entirely, so they cannot be
-used to add or alter an administrator later. After creation, administrators
-create other accounts through the API.
+`ecdb database create` is the **only** operation that may seed an administrator,
+and it reads exactly two variables, `EC_ADMIN_EMAIL` and `EC_ADMIN_SECRET`, both
+validated before the database file is created. Opening an existing database
+ignores them entirely, so they cannot be used to add or alter an administrator
+later; after creation, administrators create other accounts through the API. The
+rules for setting one, both, or neither are in
+[`cmd/ecdb/README.md`](cmd/ecdb/README.md#the-initial-administrator).
 
 ### Backups
 
-Not automated, and deliberately so. A few things worth knowing:
+`ecdb database backup` takes one, using SQLite's `VACUUM INTO` so a copy is
+consistent even against a running server. The procedure, the naming, the file
+permissions, and what restoring does to live sessions are documented with the
+command, in [`cmd/ecdb/README.md`](cmd/ecdb/README.md#backups).
 
-- The database is in **WAL** mode, so `ecv8.db` alone is not a complete copy.
-  Copying the file while the server is running can capture a torn state.
-- The correct way to take a consistent copy of a live database is SQLite's
-  `VACUUM INTO 'destination.db'`, or `sqlite3 ecv8.db ".backup out.db"`. Both
-  produce a single self-contained file with no sidecars.
-- Stopping the service first and copying `ecv8.db`, `ecv8.db-wal`, and
-  `ecv8.db-shm` together also works, but only all three together.
-- A backup contains bcrypt password hashes, activation-token hashes, and live
-  session fingerprints. Treat it as a secret: an attacker with a backup can
-  reissue nothing, but can attempt offline password cracking.
-- Restoring an older backup does not invalidate sessions issued after it was
-  taken; those simply cease to exist, so their holders are signed out.
+Scheduling and retention are not in scope here. Taking a backup is a command;
+deciding when to take one is cron's job and an operator's policy.
 
 ---
 
 ## Architecture
 
 ```
-cmd/ecdb/              database commands: create, verify
+cmd/ecdb/              database commands: create, verify, version, upgrade,
+                       backup, compact — all under `ecdb database`
+                       README.md: the command reference for all of them
 cmd/ecapi/             server entry point, command tree, logger construction
                        ecapi.service: sample systemd unit, installed by hand
 cmd/earl/              API client; HTTP only, no store package, no game rules
@@ -649,13 +661,39 @@ address rather than the proxy's.
 gofmt -l .                 # no output means formatted
 go build ./...
 go vet ./...
+go test ./...              # see Tests, below, for what is covered
 ```
 
 ---
 
 ## Tests
 
-There are none, by design, in this first version. No Go unit, integration, or
-end-to-end tests exist, and the generated placeholders were removed rather than
-kept as meaningless green checks. `go build` and `go vet` are the checks that
-run. When tests are added, this section is the place to say so.
+```bash
+go test ./...
+```
+
+**The database commands are tested; nothing else is yet.**
+`cmd/ecdb/main_test.go` drives `run` with real arguments — the same entry point
+`main` uses — and asserts what each subcommand prints, what it refuses, and what
+it leaves on disk. It reaches past the command only to inspect a database, never
+to arrange one a command could have made itself.
+
+The tests exist because the file on disk is the one thing here with no undo. The
+invariants they hold are the destructive ones:
+
+- `create` never truncates an existing database, and never creates a directory.
+- A refused command changes nothing — not a byte, not the journal mode. This is
+  checked by digest, not just by query, because a writable open can rewrite a
+  file on its way in to deciding it should not have been opened.
+- Inspection never mutates, including a database newer than the binary.
+- A backup is created `0600`, is a valid database with the source's contents,
+  and leaves the source untouched.
+- `backup` and `compact` refuse a migration mismatch rather than migrating.
+
+They use the standard library only, and each one builds its own database under
+`t.TempDir()`. Every `EC_`-prefixed variable is cleared for the duration of a
+test, so a developer's own `EC_DB_PATH` cannot decide what is being run.
+
+The rest of the service has no tests. The generated placeholders were removed
+rather than kept as meaningless green checks, and nothing else has been added
+speculatively. When another area is covered, this section is the place to say so.

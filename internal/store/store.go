@@ -48,6 +48,11 @@ const (
 	ErrNotECV8Database = cerrs.Error("not an ECV8 database")
 	// ErrDatabaseTooNew reports a database migrated past this binary.
 	ErrDatabaseTooNew = cerrs.Error("database is newer than this binary")
+	// ErrMigrationMismatch reports a database that is not at the migration level
+	// this binary was built for. Maintenance refuses such a database rather than
+	// migrating it, because compacting or backing up must never be the operation
+	// that changes a schema.
+	ErrMigrationMismatch = cerrs.Error("database is not at this binary's migration level")
 	// ErrInvalidName reports an unusable temporary-store name.
 	ErrInvalidName = cerrs.Error("invalid temporary database name")
 	// ErrReadOnly reports a write attempted against a read-only store.
@@ -143,7 +148,7 @@ func CreatePersistentStore(ctx context.Context, dir string) (*DB, error) {
 		return nil, fmt.Errorf("create %s: %w", path, err)
 	}
 
-	db, err := openPersistent(ctx, path, false)
+	db, _, err := openPersistent(ctx, path, persistentOptions{})
 	if err != nil {
 		removeNewDatabase(path)
 		return nil, err
@@ -169,7 +174,8 @@ func OpenPersistentStore(ctx context.Context, dir string, readOnly bool) (*DB, e
 	if err != nil {
 		return nil, err
 	}
-	return openPersistent(ctx, path, readOnly)
+	db, _, err := openPersistent(ctx, path, persistentOptions{readOnly: readOnly})
+	return db, err
 }
 
 // OpenTemporaryStore opens the named shared in-memory database, applying
@@ -200,7 +206,7 @@ func OpenTemporaryStore(ctx context.Context, name string) (*DB, error) {
 	pool, err := sqlitex.NewPool(uri, sqlitex.PoolOptions{
 		Flags:       flags,
 		PoolSize:    poolSize(),
-		PrepareConn: prepareConn(false),
+		PrepareConn: prepareConn(persistentOptions{}),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open temporary store %q: %w", name, err)
@@ -226,99 +232,139 @@ func OpenTemporaryStore(ctx context.Context, name string) (*DB, error) {
 	return db, nil
 }
 
+// persistentOptions selects how an open treats the file it finds.
+//
+// The zero value is the ordinary writable open: migrate forward, reject a
+// database this binary is too old for.
+type persistentOptions struct {
+	// readOnly opens in genuine SQLite read-only mode. Nothing is written and
+	// no migration runs, so a database newer than this binary is acceptable.
+	readOnly bool
+
+	// skipMigrate opens writably without bringing the database forward. Only
+	// maintenance uses it: VACUUM must not be the operation that quietly
+	// changes a schema, so the caller checks the version it is given and
+	// refuses rather than migrating.
+	skipMigrate bool
+
+	// allowVacuumInto leaves PRAGMA query_only off on an otherwise read-only
+	// open. SQLite refuses VACUUM INTO under query_only, even though the
+	// statement writes only the new file and never the source, so a backup
+	// cannot have both. SQLITE_OPEN_READONLY is still set: what is given up is
+	// the in-process assertion, not the guarantee that the source is unwritable.
+	allowVacuumInto bool
+}
+
 // openPersistent opens an existing (possibly empty) database file, verifies the
 // application marker, and brings it to the migration level this binary expects.
-func openPersistent(ctx context.Context, path string, readOnly bool) (*DB, error) {
+//
+// It returns the user_version the file carried *before* any migration ran,
+// which is what lets a caller report whether it actually changed anything.
+func openPersistent(ctx context.Context, path string, opts persistentOptions) (*DB, int, error) {
 	// The path is passed as a plain filename with OpenURI unset, so SQLite does
 	// no URI parsing at all. That removes any possibility of a caller-supplied
 	// path smuggling query parameters that would change the open mode.
 	//
 	// OpenCreate is never set, so SQLite will not create a missing file.
 	//
-	// OpenWAL is deliberately absent from the read-only flags: ZombieZen
-	// implements it by running "PRAGMA journal_mode = wal" on every connection,
-	// which is a write. A read-only open must not write, and WAL is a property
-	// already recorded in the file, so a read-only connection inherits it.
+	// OpenWAL is deliberately absent from the read-only and maintenance flags:
+	// ZombieZen implements it by running "PRAGMA journal_mode = wal" on every
+	// connection, which is a write. A read-only open must not write, and a
+	// maintenance open must be able to refuse a database without having changed
+	// it. WAL is a property already recorded in the file, so either connection
+	// inherits it.
 	flags := sqlite.OpenReadWrite | sqlite.OpenWAL
-	if readOnly {
+	switch {
+	case opts.readOnly:
 		flags = sqlite.OpenReadOnly
+	case opts.skipMigrate:
+		flags = sqlite.OpenReadWrite
 	}
 
 	pool, err := sqlitex.NewPool(path, sqlitex.PoolOptions{
 		Flags:       flags,
 		PoolSize:    poolSize(),
-		PrepareConn: prepareConn(readOnly),
+		PrepareConn: prepareConn(opts),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", path, err)
+		return nil, 0, fmt.Errorf("open %s: %w", path, err)
 	}
 	conn, err := pool.Take(ctx)
 	if err != nil {
 		_ = pool.Close()
-		return nil, fmt.Errorf("open %s: %w", path, err)
+		return nil, 0, fmt.Errorf("open %s: %w", path, err)
 	}
 
 	// The connection must go back to the pool before the pool is closed:
 	// sqlitex.Pool.Close waits for every connection to be returned, so closing
 	// while holding one deadlocks.
-	initErr := initializePersistent(ctx, conn, path, readOnly)
+	current, initErr := initializePersistent(ctx, conn, path, opts)
 	pool.Put(conn)
 	if initErr != nil {
 		_ = pool.Close()
-		return nil, initErr
+		return nil, 0, initErr
 	}
 
-	return &DB{pool: pool, readOnly: readOnly, label: path}, nil
+	return &DB{pool: pool, readOnly: opts.readOnly, label: path}, current, nil
 }
 
-// initializePersistent validates the application marker and brings a writable
-// database up to date. It performs no write when readOnly is true.
-func initializePersistent(ctx context.Context, conn *sqlite.Conn, path string, readOnly bool) error {
-	if readOnly {
+// initializePersistent validates the application marker, brings a writable
+// database up to date, and returns the migration level the file already had. It
+// performs no write when opts.readOnly is true.
+func initializePersistent(ctx context.Context, conn *sqlite.Conn, path string, opts persistentOptions) (int, error) {
+	if opts.readOnly {
 		// The marker is checked directly rather than through sqlitemigration,
 		// which would set it.
 		if err := verifyApplicationID(conn); err != nil {
-			return fmt.Errorf("%s: %w", path, err)
+			return 0, fmt.Errorf("%s: %w", path, err)
 		}
-		if _, err := pragmaInt(conn, "user_version"); err != nil {
-			return fmt.Errorf("%s: %w", path, err)
+		current, err := pragmaInt(conn, "user_version")
+		if err != nil {
+			return 0, fmt.Errorf("%s: %w", path, err)
 		}
 		// A newer database is acceptable read-only: nothing is migrated and
 		// nothing is written, so an older binary can still inspect it.
-		return nil
+		return current, nil
 	}
 
 	// A brand new file has no schema and application_id 0; sqlitemigration
 	// adopts it. Any other mismatch must be rejected before we write anything.
 	empty, err := isEmptyDatabase(conn)
 	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return 0, fmt.Errorf("%s: %w", path, err)
 	}
 	if !empty {
 		if err := verifyApplicationID(conn); err != nil {
-			return fmt.Errorf("%s: %w", path, err)
+			return 0, fmt.Errorf("%s: %w", path, err)
 		}
 	}
 
 	current, err := pragmaInt(conn, "user_version")
 	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return 0, fmt.Errorf("%s: %w", path, err)
 	}
 	if latest := LatestMigration(); current > latest {
-		return fmt.Errorf("%s: %w: database is at migration %d, binary knows %d",
+		return 0, fmt.Errorf("%s: %w: database is at migration %d, binary knows %d",
 			path, ErrDatabaseTooNew, current, latest)
+	}
+
+	// A maintenance open stops here, before anything is written. Its caller
+	// decides whether it will act on this database at all, and one it refuses
+	// must be left exactly as it was found — including its journal mode.
+	if opts.skipMigrate {
+		return current, nil
 	}
 
 	// WAL is a property of the file, not of a connection, but it is set and
 	// verified on every writable open so a database restored from a non-WAL
 	// copy is corrected rather than silently left in rollback-journal mode.
 	if err := ensureWAL(conn); err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return 0, fmt.Errorf("%s: %w", path, err)
 	}
 	if err := sqlitemigration.Migrate(ctx, conn, schema); err != nil {
-		return fmt.Errorf("migrate %s: %w", path, err)
+		return 0, fmt.Errorf("migrate %s: %w", path, err)
 	}
-	return nil
+	return current, nil
 }
 
 // prepareConn returns the per-connection setup for a pool.
@@ -326,7 +372,7 @@ func initializePersistent(ctx context.Context, conn *sqlite.Conn, path string, r
 // SQLite pragmas are per-connection, and sqlitex may open connections lazily,
 // so these must be applied here rather than once at startup. Otherwise a
 // connection acquired later would silently run without foreign keys.
-func prepareConn(readOnly bool) sqlitex.ConnPrepareFunc {
+func prepareConn(opts persistentOptions) sqlitex.ConnPrepareFunc {
 	return func(conn *sqlite.Conn) error {
 		if err := sqlitex.ExecuteTransient(conn,
 			fmt.Sprintf("PRAGMA busy_timeout = %d;", busyTimeoutMillis), nil); err != nil {
@@ -335,9 +381,14 @@ func prepareConn(readOnly bool) sqlitex.ConnPrepareFunc {
 		if err := sqlitex.ExecuteTransient(conn, "PRAGMA foreign_keys = ON;", nil); err != nil {
 			return fmt.Errorf("enable foreign keys: %w", err)
 		}
-		if readOnly {
+		if opts.readOnly {
 			// Belt and braces alongside SQLITE_OPEN_READONLY: query_only makes
-			// an accidental write fail loudly inside this process too.
+			// an accidental write fail loudly inside this process too. A backup
+			// is the one open that cannot have it, because SQLite counts
+			// VACUUM INTO as a write even though the source is untouched.
+			if opts.allowVacuumInto {
+				return nil
+			}
 			if err := sqlitex.ExecuteTransient(conn, "PRAGMA query_only = ON;", nil); err != nil {
 				return fmt.Errorf("set query_only: %w", err)
 			}

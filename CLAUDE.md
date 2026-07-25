@@ -10,6 +10,7 @@ work here_ — the conventions, the checks, and the traps.
 | Question                          | Where the answer is                    |
 | --------------------------------- | -------------------------------------- |
 | What the service does, why        | `README.md` (this directory)           |
+| What every `ecdb` subcommand does | `cmd/ecdb/README.md`                   |
 | Every flag and environment variable | `README.md` § Configuration, `.env.example` |
 | Endpoint list and payload shapes  | `README.md` § HTTP API                 |
 | Why a security choice was made    | `README.md` § Security notes           |
@@ -34,17 +35,20 @@ Run everything from this directory.
 ```bash
 gofmt -l .            # no output means formatted
 go build ./...
-go vet ./...          # these three are the checks — run all of them
+go vet ./...
+go test ./...         # these four are the checks — run all of them
 air                   # live reload; config in .air.toml, binaries in tmp/
 go run ./cmd/ecapi serve --memory dev       # seeded in-memory database
-go run ./cmd/ecdb verify --db-path games/alpha
+go run ./cmd/ecdb database verify --db-path games/alpha
 ```
 
 Three binaries are built from this module, and the split between them is the
-point. `cmd/ecdb` owns the database file — `create`, `verify`, and whatever
-storage-only work comes later — and takes only `--db-path`. `cmd/ecapi` serves
-HTTP and never creates a database. `cmd/earl` is a client and never touches
-either. `air` builds `ecapi`.
+point. `cmd/ecdb` owns the database file and takes only `--db-path` and
+`--quiet`; every operation on the file lives under its `database` subcommand
+(`create`, `verify`, `version`, `upgrade`, `backup`, `compact`), so a new
+storage-only command has an obvious home and the group's existence keeps
+non-database work visibly separate. `cmd/ecapi` serves HTTP and never creates a
+database. `cmd/earl` is a client and never touches either. `air` builds `ecapi`.
 
 Keep the boundaries. A command that creates a database must not also be able to
 serve one, because the long-running service is then confined to what it
@@ -66,11 +70,21 @@ value, a password, or a hash.
 `cmd/ecapi/ecapi.service` is a sample systemd unit, documentation only. Nothing
 builds, installs, or reads it, and deployment automation stays out of scope.
 
-**There are no tests, by design** (`README.md` § Tests). `gofmt -l . && go build
-./... && go vet ./...` are the checks. Run all three after any change and report
-the real output. Do not add `_test.go` placeholders or reintroduce the generated
-test files that were deliberately removed; if the user asks for real tests, add
-them and update `README.md` § Tests in the same change.
+**`gofmt -l . && go build ./... && go vet ./... && go test ./...` are the
+checks.** Run all four after any change and report the real output.
+
+**Only the database commands are tested** (`README.md` § Tests). The suite is
+`cmd/ecdb/main_test.go`, and it drives `run` with real arguments rather than
+calling handlers directly, because the contract worth protecting is the
+command's: what it prints, what it refuses, and what it leaves on disk. Standard
+library only — no assertion package — and each test builds its own database
+under `t.TempDir()` with `isolateEnv` clearing every `EC_` variable first.
+
+The rest of the service is deliberately untested for now. **Do not add `_test.go`
+placeholders** or reintroduce the generated test files that were removed, and do
+not add tests for an area the user has not asked to cover. When a new area is
+covered, say so in `README.md` § Tests in the same change. A new `ecdb`
+subcommand, though, is expected to bring a test with it.
 
 **Go 1.26.4 is pinned exactly**, and `go.mod` declares it. If the local
 toolchain disagrees, stop and report the mismatch — do not edit the `go` line,
@@ -155,6 +169,13 @@ a non-directory, or one it cannot write to — before touching the filesystem. N
 at the wrong directory must get a clear error, not a new database in a new
 directory.
 
+**Maintenance never migrates as a side effect.** `store.BackupPersistent` and
+`store.CompactPersistent` refuse a database that is not at this binary's
+migration level (`ErrMigrationMismatch`) instead of bringing it forward. An
+operator asking for a copy must not be handed a schema change, and `VACUUM` must
+not be the thing that changes a schema. Migrating is `MigratePersistent`'s job
+and a separate decision. `internal/store/maintenance.go` says why at more length.
+
 **`bcrypt.MinCost` is the specified cost, not an oversight.** The brief calls
 for it exactly, and `internal/password` documents it. A cost of 4 reads like a
 security defect, so the reflex is to raise it — don't. Changing it also
@@ -197,7 +218,7 @@ authorise on the rules in `identity`, and never assume they are the same.
 4. Response type in `views.go` — no store model on the wire.
 5. Register it in `s.routes()` under the right group so `requireAuth` or
    `requireAdmin` applies.
-6. `gofmt -l . && go build ./... && go vet ./...`.
+6. `gofmt -l . && go build ./... && go vet ./... && go test ./...`.
 7. Update the endpoint table in `README.md` § HTTP API.
 
 ## Adding a migration
@@ -225,9 +246,19 @@ automatically; dotenv files populate the environment before flags parse, so they
 can never override a flag.
 
 An option `ecdb` also needs goes on `config.Database` in
-`internal/config/database.go` too. Anything both binaries bind is registered by
-one helper — see `bindDBPath` — so the two can never describe the same flag
-differently.
+`internal/config/database.go` too, and in the flag table in `cmd/ecdb/README.md`
+§ Flags and environment. Anything both binaries bind is registered by one helper
+— see `bindDBPath` — so the two can never describe the same flag differently.
+
+## Adding an `ecdb` subcommand
+
+Under `database`, unless it does not touch the database file at all. Wrap the
+`Exec` in `databaseExec` so it rejects positional arguments and validates
+`--db-path` the same way every other one does. Storage work goes in
+`internal/store`, never inline in the command. Then document it in
+`cmd/ecdb/README.md` — that file is the command's reference, and `README.md` in
+this directory only points at it — and add a test to `cmd/ecdb/main_test.go`
+that drives `run` with real arguments.
 
 ## Seeing a change in a browser
 
@@ -252,10 +283,9 @@ The brief rules these out, and "no" is the finished answer, not a gap to fill:
 
 - CI configuration, Dockerfiles, Docker Compose, deployment automation
 - nginx configuration (production TLS is an operator concern, documented only)
-- backup automation — `README.md` § Backups explains the manual procedure and
-  why it stays manual
-- a separate database-upgrade utility — `serve` migrates on open, and that is
-  what keeps the binary and schema in step
+- backup *scheduling* and retention — `ecdb database backup` takes a backup when
+  it is asked to. When to ask is cron's job and an operator's policy, and
+  neither belongs in this binary. Same for `compact`.
 - email delivery: the application never sends mail. An activation URL is
   returned once for an administrator to deliver out of band.
 - public web-based registration: administrators create every account

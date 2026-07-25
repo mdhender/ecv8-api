@@ -24,6 +24,12 @@ type Database struct {
 
 	// DBPath is the directory holding ecv8.db. The filename is fixed.
 	DBPath string
+
+	// Quiet suppresses the status lines that report what a command did. It
+	// never suppresses a value a command was asked to produce — a path, a
+	// version number — because a script that captures those would otherwise
+	// read an empty string as a success.
+	Quiet bool
 }
 
 // BindDatabase registers every database flag on fs and returns the Database the
@@ -35,6 +41,10 @@ func BindDatabase(fs *ff.FlagSet) *Database {
 		DBPath: defaultDBPath,
 	}
 	bindDBPath(fs, &cfg.DBPath)
+	// Not registered by a shared helper: ecapi has no use for it, and a server
+	// that could be told to say less about what it is doing would be a worse
+	// server, not a quieter one.
+	fs.BoolVar(&cfg.Quiet, 0, "quiet", "suppress status output; values a command was asked for are still printed")
 	return &cfg
 }
 
