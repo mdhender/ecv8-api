@@ -147,9 +147,10 @@ a silent authentication failure rather than an obvious one:
 
 ## Commands
 
-**`ecdb` owns the database file. `ecapi` serves HTTP.** They are separate
-binaries so the long-running service can be installed and confined without
-carrying the ability to create a database or seed an administrator.
+**`ecdb` owns the database file. `ecapi` serves HTTP. `earl` is a client.** They
+are separate binaries so the long-running service can be installed and confined
+without carrying the ability to create a database or seed an administrator, and
+so the client has no way to reach the database at all.
 
 ```
 ecdb create                       create ecv8.db and seed the initial admin
@@ -158,12 +159,54 @@ ecdb version                      print the build version
 
 ecapi serve                       open the database and serve the HTTP API
 ecapi version                     print the build version
+
+earl get|post|put|patch|delete    send that method to an API path
+earl login | logout               authenticate, and save or forget the session
+earl whoami | identities          show the current session, or the saved ones
+earl version                      print the build version
 ```
 
 Every command accepts `--help`, which lists the flags in scope with their
 defaults. `ecdb` takes only `--db-path`: a command that never opens a listener
 should not accept `--listen-addr`, nor be refused for a `--public-base-url` it
 would never use.
+
+### earl
+
+`earl` exercises the API the way a client does, over HTTP and nothing else. It
+imports no store package and cannot open the database, which is what makes it
+evidence: if `earl` can do it, a real client can.
+
+The REST surface is the command line — the verb and path you would send are what
+you type — so it covers every endpoint without per-endpoint code:
+
+```bash
+earl login --email admin@example.com          # password from EARL_PASSWORD
+earl whoami                                   # sugar for: earl get /session
+earl get /admin/accounts
+earl post /admin/accounts -d '{"email":"t@x.com","role":"user","display_name":"T"}'
+earl patch /me -d @profile.json
+earl get /me --no-auth                        # see what an anonymous caller gets
+```
+
+Paths are relative to `--base-url` (`EARL_BASE_URL`), which defaults to
+`http://localhost:3000` and has `/api/v1` appended when it carries no path of
+its own. `earl` addresses the API directly rather than through the development
+proxy, because none of the reasons a browser must use the proxy apply to it: it
+sends no `Origin`, so cross-origin protection does not reject it, and it stores
+the session cookie itself.
+
+This API authenticates with an HttpOnly session cookie, and that cookie's value
+is returned exactly once, in the `Set-Cookie` header of a successful login.
+`earl login` captures it and saves it in
+`~/.config/earl/{EC_ENV}/credentials.json`, keyed by base URL and account, so
+several identities can be held at once and `--email` picks between them. **The
+saved value is a live session token**, so the file is `0600` in a `0700`
+directory and `earl` never prints it. `EARL_CREDENTIALS` overrides the path.
+
+Its own flags read `EARL_`-prefixed variables rather than `EC_`, so pointing the
+client at another host never means touching a server's configuration. `EC_ENV`
+is shared, because a checkout has one idea of which environment it is in.
 
 `ecv8-api` is the original single binary and still does both. It is unchanged
 and will be removed whole once the split is finished, so add nothing to it —
@@ -276,6 +319,7 @@ Not automated, and deliberately so. A few things worth knowing:
 cmd/ecdb/              database commands: create, verify
 cmd/ecapi/             server entry point, command tree, logger construction
                        ecapi.service: sample systemd unit, installed by hand
+cmd/earl/              API client; HTTP only, no store package, no game rules
 cmd/ecv8-api/          the original single binary; unchanged until it is removed
 internal/
   cerrs/               constant sentinel errors

@@ -40,12 +40,25 @@ go run ./cmd/ecapi serve --memory dev       # seeded in-memory database
 go run ./cmd/ecdb verify --db-path games/alpha
 ```
 
-Three binaries are built from this module. `cmd/ecdb` owns the database file —
+Four binaries are built from this module. `cmd/ecdb` owns the database file —
 `create`, `verify`, and whatever storage-only work comes later — and takes only
-`--db-path`. `cmd/ecapi` serves HTTP and never creates a database.
-`cmd/ecv8-api` is the original binary that did both; it is **unchanged and will
-be removed whole** when the split finishes, so add nothing to it and do not
-trim it piecemeal. `air` builds `ecapi`.
+`--db-path`. `cmd/ecapi` serves HTTP and never creates a database. `cmd/earl`
+is a client. `cmd/ecv8-api` is the original binary that did both; it is
+**unchanged and will be removed whole** when the split finishes, so add nothing
+to it and do not trim it piecemeal. `air` builds `ecapi`.
+
+**`earl` speaks HTTP and only HTTP.** It must never import `internal/store`,
+never open a database, and never implement a rule the server owns — it sends a
+request and prints what comes back. Its value is that it is not privileged: if
+`earl` can do something, a real client can. A convenience that shortcuts the API
+would quietly destroy that. The REST surface is its command line
+(`earl get /admin/accounts`), so a new endpoint needs no `earl` change; only the
+commands that touch the saved session — `login`, `logout`, `identities` — are
+special, plus `whoami` as the one alias.
+
+The saved session cookie is a live credential. `earl` writes it `0600` and never
+prints it, on the same rule the server follows: never log a token, a cookie
+value, a password, or a hash.
 
 `cmd/ecapi/ecapi.service` is a sample systemd unit, documentation only. Nothing
 builds, installs, or reads it, and deployment automation stays out of scope.
