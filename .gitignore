@@ -3,6 +3,12 @@
 /bin/
 /dist/
 
+# Air rebuilds the binary here on every save.
+/tmp/
+
+# games
+/games
+
 # Databases. ecv8.db and its WAL sidecars are runtime data and must never be
 # committed: they hold password hashes, activation-token hashes, and live
 # session fingerprints.

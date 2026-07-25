@@ -1,0 +1,28 @@
+# Air - Live reload for Go apps
+# Install: go install github.com/air-verse/air@latest
+# Run: air
+
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "go build -o ./tmp/ecv8-api ./cmd/ecv8-api"
+  bin = "./tmp/ecv8-api"
+  args_bin = ["serve"]
+  delay = 1000
+  exclude_dir = [".git", ".idea", "data", "dist", "tmp"]
+  exclude_regex = ["_test\\.go$"]
+  include_ext = ["go", "sql"]
+  kill_delay = 500
+
+[log]
+  time = false
+
+[color]
+  main = "magenta"
+  watcher = "cyan"
+  build = "yellow"
+  runner = "green"
+
+[misc]
+  clean_on_exit = true

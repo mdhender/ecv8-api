@@ -24,7 +24,9 @@ parent repository above the two.
 - [Architecture](#architecture)
 - [Security notes](#security-notes)
 - [HTTP API](#http-api)
-- [Development with Caddy](#development-with-caddy)
+- [Development](#development)
+  - [Primary setup: system Caddy over HTTPS](#primary-setup-system-caddy-over-https)
+  - [Alternative: standalone plain-HTTP proxy](#alternative-standalone-plain-http-proxy)
 - [Validation](#validation)
 - [Tests](#tests)
 
@@ -36,6 +38,7 @@ parent repository above the two.
 |-------|----------|-------|
 | Go    | 1.26.4   | Exact version this module declares. |
 | Caddy | 2.x      | Development proxy only; production uses nginx. |
+| Air   | latest   | Optional. Live reload for the API; see `.air.toml`. |
 
 The SQLite engine is compiled in through ZombieZen, which is CGO-free. There is
 nothing to install beyond Go.
@@ -53,20 +56,21 @@ EC_ADMIN_EMAIL=admin@example.com EC_ADMIN_SECRET='choose-a-good-secret' \
   go run ./cmd/ecv8-api db create --db-path db
 
 # 3. Serve it.
-go run ./cmd/ecv8-api serve --db-path db --cookie-secure=false
+go run ./cmd/ecv8-api serve --db-path db
 
 # 4. Check it is alive.
 curl -s localhost:3000/api/v1/health/ready
 ```
 
-`--cookie-secure=false` is needed only because the default development origin is
-plain HTTP. See [Development with Caddy](#development-with-caddy).
+That serves the API on its own. To use it from a browser you also need the Ember
+dev server and a proxy putting both behind one origin — see
+[Development](#development).
 
 To work on the frontend without a database on disk, run against a seeded
 in-memory database instead:
 
 ```bash
-go run ./cmd/ecv8-api serve --memory dev --cookie-secure=false
+go run ./cmd/ecv8-api serve --memory dev
 ```
 
 That gives you four accounts — `admin@example.com/admin`, `gm1@example.com/gm1`,
@@ -109,7 +113,7 @@ Flags map to environment variables by upper-casing and prefixing with `EC_`:
 | `--memory` | `EC_MEMORY` | *(unset)* | Serve a seeded in-memory database instead. Development only. |
 | `--read-only` | `EC_READ_ONLY` | `false` | Open SQLite read-only. Write endpoints fail. |
 | `--listen-addr` | `EC_LISTEN_ADDR` | `127.0.0.1:3000` | Private HTTP listener. |
-| `--public-base-url` | `EC_PUBLIC_BASE_URL` | `http://localhost:8081` | Origin browsers use. Activation links are built from it. |
+| `--public-base-url` | `EC_PUBLIC_BASE_URL` | `https://ecv8.localhost:8443` | Origin browsers use. Activation links are built from it. |
 | `--read-timeout` | `EC_READ_TIMEOUT` | `15s` | Whole-request read deadline. |
 | `--read-header-timeout` | `EC_READ_HEADER_TIMEOUT` | `5s` | Header read deadline. |
 | `--write-timeout` | `EC_WRITE_TIMEOUT` | `30s` | Response write deadline. |
@@ -442,55 +446,122 @@ and referential integrity survive. `is_active=false` is the whole story.
 
 ---
 
-## Development with Caddy
+## Development
 
-Production serves the Ember build and this API from **one origin** behind nginx.
-Development reproduces that with Caddy, because otherwise the Ember dev server
-(`:4200`) and this API (`:3000`) are different origins and the session cookie,
-`SameSite`, and cross-origin protection all behave differently than they will in
-production.
+Production serves the Ember build and this API from **one origin** behind nginx,
+which terminates TLS. Development reproduces that shape with Caddy, because
+otherwise the Ember dev server (`:4200`) and this API (`:3000`) are different
+origins, and the session cookie, `SameSite`, and cross-origin protection all
+behave differently than they will in production.
 
 ```
-browser ──▶ http://localhost:8081  (Caddy)
-                 ├── /api/*  ──▶ 127.0.0.1:3000   this service
-                 └── /*      ──▶ 127.0.0.1:4200   Ember dev server
+browser ──▶ https://ecv8.localhost:8443  (Caddy, tls internal)
+                 ├── /api/*  ──▶ localhost:3000   this service
+                 └── /*      ──▶ localhost:4200   Ember dev server
 ```
 
-Three terminals:
+### Primary setup: system Caddy over HTTPS
+
+A long-running Caddy — a Homebrew service, for instance — serves
+`ecv8.localhost:8443` with `tls internal`, so development uses real HTTPS from
+Caddy's own CA. This matches production most closely: `--cookie-secure` stays at
+its default `true`, exactly as it will be behind nginx.
+
+Add a site to the system Caddyfile (`/opt/homebrew/etc/Caddyfile` on Homebrew):
+
+```caddy
+ecv8.localhost:8080 {
+	redir https://ecv8.localhost:8443{uri}
+}
+
+ecv8.localhost:8443 {
+	tls internal
+	encode zstd gzip
+
+	# The API owns this prefix. handle blocks are mutually exclusive, so the
+	# first match wins and nothing here falls through to Ember.
+	@api path /api/*
+	handle @api {
+		reverse_proxy localhost:3000
+	}
+
+	# Everything else is the Ember dev server. reverse_proxy passes WebSocket
+	# upgrades through unchanged, which is what Vite's HMR needs.
+	handle {
+		reverse_proxy localhost:4200
+	}
+
+	# Do not pin HSTS on a hostname you also use over plain http in development.
+	header {
+		Strict-Transport-Security "max-age=0"
+	}
+}
+```
+
+Reload Caddy, then start both processes. A `Procfile.dev` in the directory above
+both repositories runs them together:
+
+```
+backend: cd api && air
+frontend: cd app && pnpm start
+```
 
 ```bash
-# 1. API
-go run ./cmd/ecv8-api serve --db-path db --cookie-secure=false
-
-# 2. Ember dev server, in ../app
-pnpm start
-
-# 3. Proxy
-caddy run --config dev/Caddyfile
+overmind start -f Procfile.dev     # or: foreman, hivemind, two terminals
 ```
 
-Then browse **http://localhost:8081**. Do not browse `http://localhost:4200`
-directly: that bypasses the proxy and the cookie will not be sent.
+Caddy is already running as a service, so it is deliberately not in the
+Procfile. `air` rebuilds and restarts the API on save; its configuration is
+`.air.toml`, and it writes binaries to the git-ignored `tmp/`.
 
-**Cookies in development.** The API must run with `--cookie-secure=false`,
-because this origin is plain HTTP and a browser silently discards a `Secure`
-cookie sent over it. Production sets it back to `true`. `SameSite=Lax` behaves
-identically either way, since the browser sees one origin.
+Then browse **https://ecv8.localhost:8443**. Do not browse
+`http://localhost:4200` directly: that bypasses the proxy and the cookie will not
+be sent.
 
-**Cross-origin protection in development.** Requests the browser makes from
-`http://localhost:8081` to `http://localhost:8081/api/...` are same-origin and
-pass with no configuration. Anything from another origin is rejected, which is
-the point. To allow a specific extra origin, name it with `--trusted-origin`
-rather than loosening the proxy.
+Set the matching values in `.env.development.local`:
 
-**Closer to production.** Change the site address in `dev/Caddyfile` to
-`https://ec.localhost`, set `--cookie-secure=true`, and set
-`EC_PUBLIC_BASE_URL=https://ec.localhost`. Caddy issues a certificate from its
-internal CA; the first run asks for `sudo` to trust it locally.
+```bash
+EC_PUBLIC_BASE_URL=https://ecv8.localhost:8443
+EC_LISTEN_ADDR=localhost:3000
+EC_DB_PATH=games/alpha
+```
 
-**Port note.** `8081` is used because `8080` is commonly occupied. Change the
-site address in `dev/Caddyfile`, `EC_PUBLIC_BASE_URL`, and the fallback proxy in
-`../app/vite.config.mjs` together if you move it.
+`EC_PUBLIC_BASE_URL` must match the origin **including the port**, because
+activation links are built from it. A mismatch produces links that look right and
+lead nowhere.
+
+### Alternative: standalone plain-HTTP proxy
+
+`dev/Caddyfile` is a self-contained proxy for when there is no system Caddy, or
+when you want one that starts and stops with the project. It serves plain HTTP on
+`http://localhost:8081`, so Secure cookies cannot be used:
+
+```bash
+caddy run --config dev/Caddyfile
+
+go run ./cmd/ecv8-api serve --db-path db \
+  --cookie-secure=false --public-base-url http://localhost:8081
+```
+
+`8081` is used because `8080` is commonly occupied. If you move it, change the
+site address in `dev/Caddyfile` and `EC_PUBLIC_BASE_URL` together.
+
+### Notes that apply to both
+
+**Cookies.** Over HTTPS, leave `--cookie-secure` at `true`. Over plain HTTP it
+must be `false`, because a browser silently discards a `Secure` cookie sent over
+`http`. `SameSite=Lax` behaves identically either way, since the browser sees one
+origin.
+
+**Cross-origin protection.** Requests the browser makes from the proxy origin to
+`/api/...` on that same origin are same-origin and pass with no configuration.
+Anything from another origin is rejected, which is the point. To allow a specific
+extra origin, name it with `--trusted-origin` rather than loosening the proxy.
+
+**Client addresses in logs.** Caddy forwards `X-Forwarded-For`, but this service
+ignores forwarding headers unless a proxy is explicitly trusted. Run with
+`--trusted-proxy 127.0.0.1/32` if you want request logs to show the real client
+address rather than the proxy's.
 
 ---
 

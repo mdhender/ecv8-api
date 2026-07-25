@@ -85,10 +85,13 @@ type Config struct {
 // Default returns the configuration used when nothing is supplied.
 func Default() Config {
 	return Config{
-		Env:               "development",
-		DBPath:            "db",
-		ListenAddr:        "127.0.0.1:3000",
-		PublicBaseURL:     "http://localhost:8081",
+		Env:        "development",
+		DBPath:     "db",
+		ListenAddr: "127.0.0.1:3000",
+		// Matches the documented development origin, which is HTTPS via Caddy's
+		// internal CA. Defaulting to HTTPS keeps CookieSecure's default of true
+		// workable out of the box instead of requiring it to be switched off.
+		PublicBaseURL:     "https://ecv8.localhost:8443",
 		ReadTimeout:       15 * time.Second,
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      30 * time.Second,

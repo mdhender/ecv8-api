@@ -1,12 +1,23 @@
-# Development reverse proxy for ECV8.
+# Standalone development reverse proxy for ECV8 — the ALTERNATIVE setup.
+#
+# The primary setup is a system-wide Caddy serving https://ecv8.localhost:8443
+# with `tls internal`, described under "Development" in the README. Use this file
+# instead when there is no system Caddy, or when a self-contained proxy that
+# starts and stops with the project is more convenient.
 #
 # Production serves the Ember build and the Go API from one origin behind nginx.
-# This file reproduces that shape locally so the session cookie, SameSite, and
-# the standard library's cross-origin protection all behave the way they will in
-# production. Without it the Ember dev server (:4200) and the API (:3000) are
-# different origins, and every one of those mechanisms behaves differently.
+# Both development setups reproduce that shape, so the session cookie, SameSite,
+# and the standard library's cross-origin protection behave the way they will in
+# production. Without a proxy the Ember dev server (:4200) and the API (:3000)
+# are different origins, and every one of those mechanisms behaves differently.
+#
+# The one difference from the primary setup: this file serves plain HTTP, so
+# Secure cookies cannot be used. Prefer the HTTPS setup when you can.
 #
 #   caddy run --config dev/Caddyfile
+#
+#   ecv8-api serve --cookie-secure=false \
+#     --public-base-url http://localhost:8081
 #
 # Then browse http://localhost:8081. Do not browse http://localhost:4200
 # directly: it bypasses this proxy and the cookie will not be sent.
@@ -16,29 +27,26 @@
 #   4200  Ember dev server (pnpm start in ../app)
 #   3000  Go API (ecv8-api serve)
 #
+# 8081 is used because 8080 is commonly already taken. If you move it, change
+# the site address below and EC_PUBLIC_BASE_URL together.
+#
 # Routing
 #   /api/*   -> Go API
 #   /*       -> Ember dev server, including its Vite HMR WebSocket
 #
-# Cookies in development
-#   The API must run with --cookie-secure=false here, because this origin is
-#   plain http and a browser silently discards a Secure cookie sent over http.
-#   Production sets it back to true. SameSite=Lax works unchanged either way,
-#   since the browser sees a single origin.
+# Cookies here
+#   The API must run with --cookie-secure=false, because this origin is plain
+#   http and a browser silently discards a Secure cookie sent over http. Both
+#   production and the primary development setup keep it true. SameSite=Lax
+#   works unchanged either way, since the browser sees a single origin.
 #
-# Cross-origin protection in development
+# Cross-origin protection here
 #   http.CrossOriginProtection reads Sec-Fetch-Site. Requests the browser makes
 #   from http://localhost:8081 to http://localhost:8081/api/... are same-origin,
 #   so they pass with no configuration. A request from any other origin is
 #   rejected, which is the intended behaviour. If you need to allow one — a
 #   separate tool on another port — add it explicitly with --trusted-origin
 #   rather than loosening the proxy.
-#
-# HTTPS variant
-#   To match production more closely, replace the site address below with
-#   `https://ec.localhost`, set the API back to --cookie-secure=true, and set
-#   EC_PUBLIC_BASE_URL=https://ec.localhost. Caddy issues a certificate from its
-#   internal CA; the first run asks for sudo so it can trust that CA locally.
 {
 	# Nothing here is public, and the plain-http site address below would
 	# otherwise make Caddy try to obtain a real certificate.
