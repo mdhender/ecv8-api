@@ -328,6 +328,34 @@ func (db *DB) MembershipByID(ctx context.Context, gameID, accountID int64) (*Mem
 	return found, nil
 }
 
+// CountActiveGameMasters reports how many active game masters a game has.
+// Callers use it to refuse a change that would leave a game nobody can run,
+// which is the same job CountActiveAdmins does for the service as a whole.
+//
+// is_agent = 0 is stated rather than relied upon. An agent can never be a game
+// master — game_player_agent_not_gm forbids it — so the filter changes no
+// answer today, and saying it means this count does not quietly start including
+// agents if that ever changes.
+func (db *DB) CountActiveGameMasters(ctx context.Context, gameID int64) (int, error) {
+	var count int
+	err := db.Read(ctx, func(conn *sqlite.Conn) error {
+		return sqlitex.Execute(conn,
+			`SELECT count(*) AS total FROM game_player
+			  WHERE game_id = :game_id AND is_gm = 1 AND is_active = 1 AND is_agent = 0;`,
+			&sqlitex.ExecOptions{
+				Named: map[string]any{":game_id": gameID},
+				ResultFunc: func(stmt *sqlite.Stmt) error {
+					count = int(stmt.GetInt64("total"))
+					return nil
+				},
+			})
+	})
+	if err != nil {
+		return 0, fmt.Errorf("count active game masters for game %d: %w", gameID, err)
+	}
+	return count, nil
+}
+
 // MembershipBySeatID returns one membership by its seat id, or ErrNotFound.
 //
 // The game is part of the lookup for the same reason it is in AgentSeatByID: a

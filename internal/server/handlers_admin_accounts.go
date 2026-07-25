@@ -11,6 +11,7 @@ import (
 	"unicode"
 
 	"github.com/labstack/echo/v5"
+	"github.com/mdhender/ecv8-api/internal/password"
 	"github.com/mdhender/ecv8-api/internal/store"
 	"github.com/mdhender/ecv8-api/internal/tokens"
 )
@@ -78,20 +79,45 @@ type createAccountRequest struct {
 	DisplayName string `json:"display_name"`
 	Timezone    string `json:"timezone"`
 	AdminNotes  string `json:"admin_notes"`
+
+	// Password, when present, creates an account that can sign in immediately
+	// and returns no activation link. The Ember client never sends it and there
+	// is no interface for it; see handleCreateAccount.
+	Password string `json:"password"`
+	// IsActive defaults to true, which is what inviting somebody means.
+	IsActive *bool `json:"is_active"`
 }
 
 // createAccountResponse pairs the new account with its one-time magic link.
+//
+// ActivationLink is null when the request supplied a password, because there is
+// then nothing to redeem. It is a pointer rather than an empty struct so that
+// "no link" is a value a client can test rather than a URL that happens to be
+// the empty string.
 type createAccountResponse struct {
-	Account        adminAccountView   `json:"account"`
-	ActivationLink activationLinkView `json:"activation_link"`
+	Account        adminAccountView    `json:"account"`
+	ActivationLink *activationLinkView `json:"activation_link"`
 }
 
-// handleCreateAccount invites an account.
+// handleCreateAccount invites an account, or creates one that can sign in
+// straight away.
 //
 // There is no public registration; administrators create every account. The
-// response carries the activation URL exactly once, because only its hash is
-// stored and the application does not send email. The administrator delivers it
-// out of band.
+// ordinary path invites: the response carries an activation URL exactly once,
+// because only its hash is stored and the application does not send email, and
+// the administrator delivers it out of band.
+//
+// Passing "password" skips that and produces an account that is already
+// activated. It exists for **testing**, where inviting and then redeeming a
+// link to reach a usable account is two requests and a token to parse, and it
+// is deliberately not surfaced in the client — nothing in `app/` sends the
+// field and no interface offers it.
+//
+// It grants an administrator nothing they did not already have. Reissuing an
+// activation link lets one take over any account today, so the capability is
+// the same and only the number of steps differs. What it does mean is that an
+// account's first password is not always chosen by its owner, which is why the
+// log line says which of the two happened.
 func (s *Server) handleCreateAccount(c *echo.Context) error {
 	var request createAccountRequest
 	if err := s.bindJSON(c, &request); err != nil {
@@ -111,40 +137,77 @@ func (s *Server) handleCreateAccount(c *echo.Context) error {
 		}
 	}
 
-	token, err := tokens.New()
-	if err != nil {
-		return err
+	// A password is hashed before anything else touches it, and the plaintext is
+	// never logged, echoed, or stored — the same rule the activation path
+	// follows once an invitee chooses one.
+	passwordHash := ""
+	if request.Password != "" {
+		if err := password.Validate(request.Password); err != nil {
+			return unprocessable("The password does not meet the requirements.",
+				FieldError{Field: "password", Message: passwordRuleMessage})
+		}
+		hash, err := password.Hash(request.Password)
+		if err != nil {
+			return err
+		}
+		passwordHash = hash
+	}
+
+	// An account with a password has nothing to redeem, so no token is minted
+	// for it. Minting one anyway would leave a live activation link nobody
+	// asked for.
+	token := ""
+	if passwordHash == "" {
+		minted, err := tokens.New()
+		if err != nil {
+			return err
+		}
+		token = minted
 	}
 
 	ctx := c.Request().Context()
 	now := store.Now()
 
+	tokenHash := ""
+	if token != "" {
+		tokenHash = tokens.Fingerprint(token)
+	}
 	account, expiresAt, err := s.db.CreateAccount(ctx, store.NewAccount{
-		Email:       request.Email,
-		Role:        request.Role,
-		DisplayName: request.DisplayName,
-		Timezone:    request.Timezone,
-		AdminNotes:  request.AdminNotes,
-	}, tokens.Fingerprint(token), now)
+		Email:        request.Email,
+		Role:         request.Role,
+		DisplayName:  request.DisplayName,
+		Timezone:     request.Timezone,
+		AdminNotes:   request.AdminNotes,
+		PasswordHash: passwordHash,
+		IsActive:     request.IsActive,
+	}, tokenHash, now)
 	if err != nil {
 		return s.storeError(err, "account")
 	}
 
-	s.log.Info("account invited",
-		"account_id", account.ID, "role", account.Role, "actor_id", identityOf(c).Actor.ID)
+	// Which of the two happened is worth a distinct line: one produces an
+	// account whose first password its owner chose, and one does not.
+	event := "account invited"
+	if passwordHash != "" {
+		event = "account created with a password"
+	}
+	s.log.Info(event,
+		"account_id", account.ID, "role", account.Role, "is_active", account.IsActive,
+		"actor_id", identityOf(c).Actor.ID)
 
 	view, err := s.adminAccountView(ctx, account, now)
 	if err != nil {
 		return err
 	}
-	return c.JSON(http.StatusCreated, envelope{Data: createAccountResponse{
-		Account: view,
-		ActivationLink: activationLinkView{
+	response := createAccountResponse{Account: view}
+	if token != "" {
+		response.ActivationLink = &activationLinkView{
 			AccountID: account.ID,
 			URL:       s.cfg.ActivationURL(token),
 			ExpiresAt: expiresAt,
-		},
-	}})
+		}
+	}
+	return c.JSON(http.StatusCreated, envelope{Data: response})
 }
 
 // updateAccountRequest is the body of PATCH /api/v1/admin/accounts/:accountID.

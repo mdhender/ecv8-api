@@ -305,6 +305,95 @@ func TestAnAdministratorCanStillDemoteAGameMaster(t *testing.T) {
 	}
 }
 
+// The administrator's escape hatch has one limit: it must not be used to leave
+// a game with nobody able to run it. A game master cannot change a GM seat, and
+// an administrator holds no seat, so a game stranded this way could not be
+// repaired from inside it.
+func TestAdministratorCannotStrandAGameWithoutAGameMaster(t *testing.T) {
+	srv, admin, db := testServer(t)
+	gameID := createGame(t, srv, admin, "Last master")
+	seatAccount(t, srv, admin, db, gameID, "gm1@example.com", true)
+	seatAccount(t, srv, admin, db, gameID, "user1@example.com", false)
+
+	account, err := db.AccountByEmail(context.Background(), "gm1@example.com")
+	if err != nil {
+		t.Fatalf("load seeded account: %v", err)
+	}
+	path := "/api/v1/admin/games/" + itoa(gameID) + "/memberships/" + itoa(account.ID)
+
+	// Both ways of taking the last game master away are the same mistake.
+	for _, testCase := range []struct{ name, body string }{
+		{"demoting", `{"is_gm":false,"is_active":true}`},
+		{"deactivating", `{"is_gm":true,"is_active":false}`},
+		{"both at once", `{"is_gm":false,"is_active":false}`},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			recorder := do(t, srv, admin, http.MethodPut, path, testCase.body)
+			if recorder.Code != http.StatusConflict {
+				t.Errorf("status = %d, want 409; body %s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+
+	// The seat is untouched, and the game is still runnable.
+	gm := signIn(t, db, "gm1@example.com")
+	master := find(t, roster(t, srv, gm, gameID), "gm1@example.com")
+	if !master.IsGM || !master.IsActive {
+		t.Errorf("the last game master ended up is_gm=%v is_active=%v", master.IsGM, master.IsActive)
+	}
+
+	// Promoting a replacement is the whole of the fix, and the message says so.
+	player := find(t, roster(t, srv, gm, gameID), "user1@example.com")
+	recorder := do(t, srv, gm, http.MethodPatch,
+		"/api/v1/games/"+itoa(gameID)+"/players/"+itoa(player.PlayerID), `{"is_gm":true}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("promote a replacement: status %d, body %s", recorder.Code, recorder.Body.String())
+	}
+	recorder = do(t, srv, admin, http.MethodPut, path, `{"is_gm":false,"is_active":true}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("demote once a replacement exists: status %d, want 200; body %s",
+			recorder.Code, recorder.Body.String())
+	}
+
+	// And the replacement is now the last one, so the guard has moved with it.
+	replacement, err := db.AccountByEmail(context.Background(), "user1@example.com")
+	if err != nil {
+		t.Fatalf("load seeded account: %v", err)
+	}
+	recorder = do(t, srv, admin, http.MethodPut,
+		"/api/v1/admin/games/"+itoa(gameID)+"/memberships/"+itoa(replacement.ID),
+		`{"is_gm":false,"is_active":true}`)
+	if recorder.Code != http.StatusConflict {
+		t.Errorf("demoting the new last master: status = %d, want 409; body %s",
+			recorder.Code, recorder.Body.String())
+	}
+}
+
+// A game with no game master at all is not stranded — there is nothing to
+// preserve — so adding and editing plain players stays unguarded.
+func TestTheGuardOnlyProtectsAnExistingGameMaster(t *testing.T) {
+	srv, admin, db := testServer(t)
+	gameID := createGame(t, srv, admin, "No master")
+
+	account, err := db.AccountByEmail(context.Background(), "user1@example.com")
+	if err != nil {
+		t.Fatalf("load seeded account: %v", err)
+	}
+	path := "/api/v1/admin/games/" + itoa(gameID) + "/memberships/" + itoa(account.ID)
+
+	// Creating a plain seat in a game that has no master.
+	if recorder := do(t, srv, admin, http.MethodPut, path,
+		`{"is_gm":false,"is_active":true}`); recorder.Code != http.StatusOK {
+		t.Fatalf("create a player: status %d, body %s", recorder.Code, recorder.Body.String())
+	}
+	// And deactivating that plain seat.
+	if recorder := do(t, srv, admin, http.MethodPut, path,
+		`{"is_gm":false,"is_active":false}`); recorder.Code != http.StatusOK {
+		t.Errorf("deactivate a player: status %d, want 200; body %s",
+			recorder.Code, recorder.Body.String())
+	}
+}
+
 // The whole roster is the game master's, so a player at the same table reaches
 // none of it — and neither does an administrator, who holds no seat.
 func TestRosterIsTheGameMastersAlone(t *testing.T) {

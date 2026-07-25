@@ -3,6 +3,7 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/labstack/echo/v5"
@@ -167,6 +168,35 @@ func (s *Server) handleSaveMembership(c *echo.Context) error {
 	}
 	if account.IsAdmin() {
 		return conflict("Administrator accounts cannot be assigned to a game.")
+	}
+
+	// Guard against leaving a game with nobody who can run it, in the same
+	// shape as the last-active-administrator guard: it looks at the change
+	// being made rather than at who is making it, so demoting somebody and
+	// deactivating them are caught by one rule.
+	//
+	// This is the only place that can catch it. A game master cannot change a
+	// GM seat at all, so an administrator is the only one who can strand a game
+	// this way — and an administrator holds no seat, so nobody would be left
+	// who could undo it from inside the game. Promoting a replacement first is
+	// the whole of the fix, which is what the message says.
+	existing, err := s.db.MembershipByID(ctx, gameID, accountID)
+	switch {
+	case err == nil:
+		if existing.IsGM && existing.IsActive && (!isGM || !isActive) {
+			remaining, err := s.db.CountActiveGameMasters(ctx, gameID)
+			if err != nil {
+				return err
+			}
+			if remaining <= 1 {
+				return conflict("This is the game's last active game master; " +
+					"make another player a game master first.")
+			}
+		}
+	case errors.Is(err, store.ErrNotFound):
+		// A membership that does not exist yet takes nothing away.
+	default:
+		return err
 	}
 
 	membership, err := s.db.UpsertMembership(ctx, gameID, accountID, isGM, isActive, store.Now())

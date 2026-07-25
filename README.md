@@ -251,12 +251,37 @@ ec app whoami
 ec app identities
 ec app logout
 ec version
+
+# Administrator only. With --secret the account can sign in at once;
+# without one this invites and prints the single-use activation link.
+echo -n 'happy' | ec account create --secret @- jenny@example.com
+ec account create --secret @- --role admin bot@example.com
+ec account create --secret @- --active=false dormant@example.com
+ec account create invitee@example.com
 ```
 
-The commands sit under `app` rather than at the top level because `ec` is
-expected to grow a broad surface, and grouping from the start is cheaper than
-moving verbs later. `version` stands alone because it reports the build and
+The commands sit under `app` and `account` rather than at the top level because
+`ec` is expected to grow a broad surface, and grouping from the start is cheaper
+than moving verbs later. `version` stands alone because it reports the build and
 talks to nothing.
+
+**Neither the address nor the credential is spelled the way `ec app login`
+spells them, and that is deliberate.** Every flag is fed by an `ECV8_`
+environment variable derived from its name, and a developer who has set
+`ECV8_EMAIL` and `ECV8_PASSWORD` so that `ec app login` works — which is exactly
+what this README recommends — has set the two variables those spellings would
+read. `ec account create someone@example.com` would then silently take the
+operator's own address and password and hand the password to a brand-new
+activated account. So the address is positional and the credential is
+`--secret`, fed by `ECV8_SECRET`, which nothing else sets.
+
+They are two different secrets in any case: the password you authenticate with,
+and the password you are assigning to somebody else. Sharing one word for them
+is what shares the variable.
+
+Flags come before the address (`ec account create [FLAGS] EMAIL`), because flag
+parsing stops at the first positional argument — the same shape as `earl post
+[FLAGS] PATH`.
 
 ### The shared session
 
@@ -719,7 +744,7 @@ All require an administrator who is **not** impersonating.
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/admin/accounts` | List. Filters: `q`, `role`, `active`. |
-| `POST` | `/admin/accounts` | Invite. Returns the account **and its one-time activation link**. |
+| `POST` | `/admin/accounts` | Invite. Returns the account **and its one-time activation link** — unless `password` is given, in which case it is created activated and `activation_link` is `null`. |
 | `GET` | `/admin/accounts/{id}` | One account. |
 | `PATCH` | `/admin/accounts/{id}` | Update, or deactivate via `is_active`. |
 | `POST` | `/admin/accounts/{id}/activation-link` | Reissue; invalidates prior links. |
@@ -735,10 +760,45 @@ All require an administrator who is **not** impersonating.
 | `POST` | `/admin/games/{id}/agents` | Seat one (`agent_key`, optional `agent_name`, `is_active`). |
 | `PATCH` | `/admin/games/{id}/agents/{playerId}` | Rename or deactivate a seated agent. |
 
+#### Creating an account with a password
+
+`POST /admin/accounts` normally invites: the account has no password, cannot
+sign in, and the response carries a single-use activation link for the
+administrator to deliver out of band.
+
+Sending `password` instead creates an account that is **already activated** and
+can sign in immediately. `activation_link` comes back `null`, because there is
+nothing to redeem and minting a link nobody asked for would leave a live
+credential lying around. `role` and `is_active` apply in both modes.
+
+```bash
+curl -X POST …/admin/accounts -d '{"email":"j@example.com","password":"happy"}'
+# -> 201 {"account":{…,"activated":true},"activation_link":null}
+```
+
+**This exists for testing**, where reaching a usable account otherwise costs an
+invitation, a token to parse, and a redemption. It is deliberately absent from
+the Ember client: nothing in `app/` sends the field and no interface offers it.
+
+It grants an administrator no authority they lacked — reissuing an activation
+link already lets one take over any account, so only the number of steps
+differs. What it does change is that an account's first password is not always
+chosen by its owner, which is why the two modes log different events. The
+password itself goes through the same `password.Validate` rule as the activation
+form, so this is not a way around it, and only the bcrypt hash is stored.
+
 Guards that return `409`: deactivating the last active administrator,
 deactivating your own account, revoking your own sessions, promoting an account
-that belongs to a game, assigning an administrator to a game, and seating an
-agent in an inactive game.
+that belongs to a game, assigning an administrator to a game, seating an agent
+in an inactive game, and **demoting or deactivating a game's last active game
+master**.
+
+That last one is the game-scoped twin of the last-administrator guard, and it
+exists because nobody could repair the damage: a game master cannot change a GM
+seat, and an administrator holds no seat, so a game left without one has no way
+back from inside itself. Both ways of taking the last master away — `is_gm:
+false` and `is_active: false` — are the same mistake and answer alike. Promoting
+a replacement first is the whole of the fix.
 
 `POST /admin/games/{id}/agents` is a POST rather than a PUT because a seat is
 not identified by its path: several agents may play one game, and seating the
@@ -920,6 +980,7 @@ Covered today:
 | `internal/server/handlers_admin_agents_test.go` | The agent endpoints: statuses, validation, scoping, and authorisation. |
 | `internal/server/handlers_games_test.go` | The player-facing game endpoints: who sees a game, and setting one up. |
 | `internal/server/handlers_game_players_test.go` | The roster a game master manages, and the four things they may not do to it. |
+| `internal/server/handlers_admin_accounts_test.go` | Account creation in both modes: invited, and activated with a password. |
 
 ### The database commands
 
@@ -1021,6 +1082,11 @@ What it holds:
   game master" would have let through, and it is the one that strands a game.
 - An administrator can still demote and deactivate the same seat, so every
   refusal above has somewhere to go.
+- But an administrator cannot take away a game's **last** active game master, by
+  demotion, by deactivation, or by both at once. The seat survives the attempt,
+  promoting a replacement lifts the guard, and the guard then moves to the
+  replacement — which is the part worth testing, because a guard that protected
+  a particular row rather than the last one would pass the first check.
 - A promoted player really can run the game — the test signs in as them and
   reads the roster, rather than believing the `is_gm` in the response.
 - The three refusals for an unusable address — nobody, an administrator, a
@@ -1031,8 +1097,33 @@ What it holds:
 - A player at the same table gets `403` from all three endpoints; an account
   with no seat and an administrator get `404`; anonymous gets `401`.
 
+### Creating an account
+
+`handlers_admin_accounts_test.go` guards the seam between the two ways an
+account comes into existence, because that is where one could quietly acquire
+the other's properties.
+
+What it holds:
+
+- An account created with a password can **actually sign in** — the test signs
+  in rather than trusting the `activated` flag, which could be right while the
+  stored hash was not.
+- That account gets **no** activation link and no pending activation row. A live
+  link nobody asked for would be a credential left lying around.
+- Omitting the password still invites, still returns the link, and still leaves
+  an account that cannot sign in.
+- `role` and `is_active` apply in the password mode too, and an inactive account
+  is refused at sign-in despite having a valid password.
+- A password too weak for `password.Validate` is a `422` naming the field, and
+  **no account is left behind** by the rejection.
+- Only the hash is stored: the plaintext is unreachable, so the test asserts
+  through `VerifyPassword` in both directions.
+- Both modes are administrator-only.
+
 ### What is not covered
 
-Accounts, sessions, activation, and the administrative endpoints have no tests.
-The generated placeholders were removed rather than kept as meaningless green
-checks. Adding coverage needs no permission — when you do, list it above.
+Sessions, impersonation, activation, and the rest of the administrative
+endpoints have no tests — account *creation* is covered, editing and revoking
+are not. Neither client has any. The generated placeholders were removed rather
+than kept as meaningless green checks. Adding coverage needs no permission —
+when you do, list it above.

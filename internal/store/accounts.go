@@ -192,13 +192,40 @@ type NewAccount struct {
 	DisplayName string
 	Timezone    string
 	AdminNotes  string
+
+	// PasswordHash, when set, creates an account that is already activated and
+	// mints no activation link.
+	//
+	// The application itself never does this: it invites, and the invitee sets
+	// their own first password, which is why nothing but that hash is ever
+	// stored. This exists so that a test can reach a usable account in one
+	// request instead of inviting and then redeeming a link, and it grants an
+	// administrator no authority they lacked — reissuing an activation link
+	// already lets one take over any account.
+	//
+	// The schema requires activated_at and password_hash to agree
+	// (account_activation_consistent), so this is the only way to set either at
+	// creation time.
+	PasswordHash string
+
+	// IsActive is whether the account may sign in at all. Nil means active,
+	// which is what inviting somebody means.
+	IsActive *bool
 }
 
-// CreateAccount invites an account and mints its first activation link.
+// CreateAccount creates an account, either invited or already activated.
 //
-// The account is created without a password hash and is therefore inactive for
-// login purposes until it activates. Both writes happen in one transaction, so
-// an account is never left invited with no way to activate.
+// Invited is the ordinary case and is what tokenHash is for: the account is
+// written without a password hash, cannot sign in, and gets an activation row
+// in the same transaction, so it is never left invited with no way to activate.
+// The returned time is when that link expires.
+//
+// Passing params.PasswordHash instead produces an account that is activated on
+// the spot and has no activation row; tokenHash is then empty and the returned
+// time is zero. One function rather than two because everything before the
+// branch — normalising the email, defaulting the display name and time zone,
+// checking the role — is the same either way, and two copies of that would be
+// two things to keep in step.
 func (db *DB) CreateAccount(ctx context.Context, params NewAccount, tokenHash string, now time.Time) (*Account, time.Time, error) {
 	email, err := NormalizeEmail(params.Email)
 	if err != nil {
@@ -219,7 +246,29 @@ func (db *DB) CreateAccount(ctx context.Context, params NewAccount, tokenHash st
 		timezone = "UTC"
 	}
 
-	expiresAt := now.Add(ActivationTTL)
+	// An account with neither a password nor a link is one nobody could ever
+	// sign in to, so refuse it here rather than writing it and finding out later.
+	activated := params.PasswordHash != ""
+	if !activated && tokenHash == "" {
+		return nil, time.Time{}, fmt.Errorf("create account: needs a password hash or an activation token")
+	}
+
+	// NULL rather than the empty string for an invited account: the schema's
+	// CHECK is written against NULL, and "" is a hash of nothing.
+	var passwordHash, activatedAt any
+	if activated {
+		passwordHash = params.PasswordHash
+		activatedAt = formatTime(now)
+	}
+	isActive := int64(1)
+	if params.IsActive != nil && !*params.IsActive {
+		isActive = 0
+	}
+
+	var expiresAt time.Time
+	if !activated {
+		expiresAt = now.Add(ActivationTTL)
+	}
 	var id int64
 
 	err = db.Write(ctx, func(conn *sqlite.Conn) error {
@@ -227,21 +276,28 @@ func (db *DB) CreateAccount(ctx context.Context, params NewAccount, tokenHash st
 			INSERT INTO account (email, role, display_name, timezone, admin_notes,
 			                     password_hash, is_active, activated_at, created_at, updated_at)
 			VALUES (:email, :role, :display_name, :timezone, :admin_notes,
-			        NULL, 1, NULL, :now, :now);`,
+			        :password_hash, :is_active, :activated_at, :now, :now);`,
 			&sqlitex.ExecOptions{
 				Named: map[string]any{
-					":email":        email,
-					":role":         params.Role,
-					":display_name": displayName,
-					":timezone":     timezone,
-					":admin_notes":  strings.TrimSpace(params.AdminNotes),
-					":now":          formatTime(now),
+					":email":         email,
+					":role":          params.Role,
+					":display_name":  displayName,
+					":timezone":      timezone,
+					":admin_notes":   strings.TrimSpace(params.AdminNotes),
+					":password_hash": passwordHash,
+					":is_active":     isActive,
+					":activated_at":  activatedAt,
+					":now":           formatTime(now),
 				},
 			}); err != nil {
 			return err
 		}
 		id = conn.LastInsertRowID()
 
+		// An activated account has nothing to redeem, so it gets no link.
+		if activated {
+			return nil
+		}
 		return sqlitex.Execute(conn, `
 			INSERT INTO account_activation (account_id, token_hash, created_at, expires_at, redeemed_at)
 			VALUES (:account_id, :token_hash, :now, :expires_at, NULL);`,

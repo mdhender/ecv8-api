@@ -45,9 +45,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -59,6 +61,12 @@ import (
 	"github.com/peterbourgon/ff/v4"
 	"github.com/peterbourgon/ff/v4/ffhelp"
 )
+
+// accountsPath is where accounts are created. It lives here rather than in
+// internal/apiclient, which deliberately names only the one path login has to
+// know: a client that started collecting endpoint constants would slowly become
+// the API surface earl proves it does not need to be.
+const accountsPath = "/admin/accounts"
 
 func main() {
 	// EC_ENV selects which dotenv files load, and scopes the credential file.
@@ -237,6 +245,107 @@ func command(env string) *ff.Command {
 
 	app.Subcommands = append(app.Subcommands, login, logout, whoami, identities)
 
+	accountFlags := ff.NewFlagSet("account").SetParent(rootFlags)
+	account := &ff.Command{
+		Name:      "account",
+		Usage:     "ec account <SUBCOMMAND> [FLAGS]",
+		ShortHelp: "create accounts, as an administrator",
+		LongHelp: "Administrators create every account; there is no public registration.\n" +
+			"These commands need a session belonging to one.",
+		Flags: accountFlags,
+	}
+
+	createFlags := ff.NewFlagSet("create").SetParent(accountFlags)
+	var (
+		createSecret      string
+		createRole        string
+		createDisplayName string
+		createActive      bool
+	)
+	// Neither the address nor the credential here may be spelled the way `ec app
+	// login` spells them, and for one reason: every flag is fed by an ECV8_
+	// environment variable derived from its name, and a developer who has set
+	// ECV8_EMAIL and ECV8_PASSWORD so that `ec app login` works has set exactly
+	// the two variables those spellings would read.
+	//
+	// The failure is silent and it is bad. `ec account create someone@example.com`
+	// would take the operator's own sign-in password, hash it, and hand it to a
+	// brand-new activated account — no flag typed, no warning, an account whose
+	// password is the administrator's.
+	//
+	// So the address is positional, which also makes it the subject of the
+	// sentence the way `earl get PATH` does, and the credential is --secret. They
+	// are genuinely two different secrets: the password you authenticate with,
+	// and the password you are assigning to somebody else. Sharing one word for
+	// them is what shares the variable.
+	createFlags.StringVar(&createSecret, 0, "secret", "",
+		"first password for the new account; @- reads stdin, @file reads a file, or set ECV8_SECRET")
+	createFlags.StringVar(&createRole, 0, "role", "", "user (default) or admin")
+	createFlags.StringVar(&createDisplayName, 0, "display-name", "", "defaults to the part before the @")
+	// Positive and defaulting true, so deactivating is --active=false rather
+	// than a flag whose name is already a negative.
+	createFlags.BoolVarDefault(&createActive, 0, "active", true, "whether the account may sign in")
+	create := &ff.Command{
+		Name: "create",
+		// Flags before the address, as `earl post [FLAGS] PATH` has it: flag
+		// parsing stops at the first positional argument, so the address has to
+		// come last.
+		Usage:     "ec account create [FLAGS] EMAIL",
+		ShortHelp: "create an account (POST " + accountsPath + ")",
+		LongHelp: "EMAIL is the address of the account being created, and --secret is its\n" +
+			"first password. Neither is --email or --password: those are the root\n" +
+			"flags for who *you* sign in as, they are fed by ECV8_EMAIL and\n" +
+			"ECV8_PASSWORD, and reusing the spelling here would silently create\n" +
+			"accounts using your own address and password.\n" +
+			"\n" +
+			"With --secret the account is activated on the spot and can sign in\n" +
+			"immediately, which is what makes a test fixture one request instead of\n" +
+			"an invitation and a redemption. Without it this invites, exactly as the\n" +
+			"administration interface does, and prints the one-time activation link.\n" +
+			"\n" +
+			"A secret given on the command line is visible to anyone who can list\n" +
+			"processes. Prefer ECV8_SECRET, or --secret @- to read it from stdin.",
+		Flags: createFlags,
+		Exec: func(ctx context.Context, args []string) error {
+			if len(args) != 1 {
+				return fmt.Errorf("create takes exactly one argument, the email address")
+			}
+			createEmail := args[0]
+			secret, err := apiclient.ReadValue(createSecret)
+			if err != nil {
+				return fmt.Errorf("create: %w", err)
+			}
+
+			// Only what was asked for is sent. Omitting a field lets the server
+			// apply its own default rather than this command inventing a second
+			// copy of one.
+			body := map[string]any{"email": createEmail}
+			if len(secret) != 0 {
+				body["password"] = string(secret)
+			}
+			if createRole != "" {
+				body["role"] = createRole
+			}
+			if createDisplayName != "" {
+				body["display_name"] = createDisplayName
+			}
+			if !createActive {
+				body["is_active"] = false
+			}
+			encoded, err := json.Marshal(body)
+			if err != nil {
+				return fmt.Errorf("create: %w", err)
+			}
+
+			client, err := newClient()
+			if err != nil {
+				return err
+			}
+			return client.Request(ctx, http.MethodPost, accountsPath, encoded, false)
+		},
+	}
+	account.Subcommands = append(account.Subcommands, create)
+
 	versionFlags := ff.NewFlagSet("version").SetParent(rootFlags)
 	versionCmd := &ff.Command{
 		Name:      "version",
@@ -254,6 +363,6 @@ func command(env string) *ff.Command {
 		},
 	}
 
-	root.Subcommands = append(root.Subcommands, app, versionCmd)
+	root.Subcommands = append(root.Subcommands, app, account, versionCmd)
 	return root
 }
