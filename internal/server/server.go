@@ -254,6 +254,9 @@ func (s *Server) routes() {
 	games := api.Group("/games", s.requireAuth)
 	games.GET("/:gameID", s.handleGetPlayerGame)
 	games.POST("/:gameID/state", s.handleCreateGameState)
+	games.GET("/:gameID/players", s.handleListPlayers)
+	games.POST("/:gameID/players", s.handleAddPlayer)
+	games.PATCH("/:gameID/players/:playerID", s.handleUpdatePlayer)
 
 	admin := api.Group("/admin", s.requireAdmin)
 	admin.GET("/accounts", s.handleListAccounts)

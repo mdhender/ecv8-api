@@ -57,6 +57,22 @@ func (s *Server) playerSeat(c *echo.Context, gameID int64) (*store.Game, *store.
 	return game, seat, nil
 }
 
+// gameMasterSeat is playerSeat, narrowed to the person who runs the game.
+//
+// Running a game is a property of the seat, not of the account: the same person
+// is a game master in one game and a player in another, so there is nothing to
+// check on the account and nothing a role could tell us.
+func (s *Server) gameMasterSeat(c *echo.Context, gameID int64) (*store.Game, *store.Membership, error) {
+	game, seat, err := s.playerSeat(c, gameID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !seat.IsGM {
+		return nil, nil, forbidden("Only this game's game master can do that.")
+	}
+	return game, seat, nil
+}
+
 // handleGetPlayerGame returns one game, its state, and what this caller may do
 // about it.
 //
@@ -145,12 +161,9 @@ func (s *Server) handleCreateGameState(c *echo.Context) error {
 	if err != nil {
 		return err
 	}
-	game, seat, err := s.playerSeat(c, gameID)
+	game, _, err := s.gameMasterSeat(c, gameID)
 	if err != nil {
 		return err
-	}
-	if !seat.IsGM {
-		return forbidden("Only this game's game master can set it up.")
 	}
 
 	var request createGameStateRequest

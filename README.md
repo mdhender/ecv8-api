@@ -632,6 +632,9 @@ silently ignored field.
 |--------|------|---------|
 | `GET` | `/games/{id}` | One game, its state, and whether you are its game master. |
 | `POST` | `/games/{id}/state` | Set the game up: write its initial state at turn 0. Game master only. |
+| `GET` | `/games/{id}/players` | The human roster, active and inactive. Game master only. |
+| `POST` | `/games/{id}/players` | Add an account by `email`, as a player or `is_gm`. Game master only. |
+| `PATCH` | `/games/{id}/players/{playerId}` | Promote to `is_gm`, or set `is_active`. Game master only. |
 
 An administrator can never hold a seat — a composite foreign key forbids it — so
 an administrator reaches neither of these. That is deliberate and matches the
@@ -668,6 +671,39 @@ Omitting it is the ordinary case and yields the same default, which comes from
 apart. A second call is `409`, not an overwrite: the seed is what makes every
 later turn reproducible, so replacing it after play began would invalidate the
 turns already resolved. Setting up an inactive game is `409` too.
+
+#### The roster
+
+One rule covers all three roster endpoints: **a game master may change player
+seats, and a game master's seat is an administrator's business.**
+
+Everything else follows from it rather than being a rule of its own. Promotion
+is allowed and is one-way, because a demotion would be a change to a GM seat.
+Deactivating a player is allowed and deactivating any game master is not —
+including your own seat, so a game cannot be left with nobody able to run it.
+`is_gm: false` is refused with `403` rather than ignored, so a client is never
+told a demotion happened when it did not.
+
+The escape hatch is what makes that safe to be strict: `PUT
+/admin/games/{id}/memberships/{accountId}` still sets any seat to any state, so
+every refusal here has somewhere to go.
+
+Accounts are added **by email address**, never by id. Listing accounts is an
+administrator's endpoint and stays that way — a game master inviting someone
+already knows the address, and a directory is precisely what running a game
+should not hand out. For the same reason every refusal reads alike: an address
+belonging to nobody, to an administrator, or to a deactivated account all answer
+`422` with "That account cannot join a game", because distinguishing them would
+turn the endpoint into a way to discover which accounts exist.
+
+Adding is a create, not a save. An account already seated is a `409` rather than
+an overwrite, since a game master adding someone is asserting they are *not* in
+the game; being wrong about that is worth reporting. Bringing back a removed
+player is `PATCH … {"is_active": true}` on the seat they still have.
+
+The roster includes inactive seats, because deactivating one is how a player is
+removed and a roster that hid them could not undo it. It excludes agent seats,
+which are the engine's players and have a listing of their own.
 
 **Seed words are decimal strings, not JSON numbers.** This is the one place the
 API sends an integer as a string. A seed word is a full-range `uint64` and a JSON
@@ -883,6 +919,7 @@ Covered today:
 | `internal/store/seed_test.go` | A PCG seed's round trip through SQLite's signed `INTEGER`. |
 | `internal/server/handlers_admin_agents_test.go` | The agent endpoints: statuses, validation, scoping, and authorisation. |
 | `internal/server/handlers_games_test.go` | The player-facing game endpoints: who sees a game, and setting one up. |
+| `internal/server/handlers_game_players_test.go` | The roster a game master manages, and the four things they may not do to it. |
 
 ### The database commands
 
@@ -968,6 +1005,31 @@ What it holds:
   leaves the first seed in place, and an unseated account — including an
   administrator — gets `404` from both endpoints rather than `403`.
 - A seat deactivated after the fact stops being able to read the game.
+
+### The roster
+
+`handlers_game_players_test.go` is mostly a test of what is refused, because
+the feature is one rule — a game master may change player seats, a GM seat is
+an administrator's business — and a rule is only worth stating if something
+enforces it.
+
+What it holds:
+
+- Demoting another game master, deactivating one, demoting **yourself**, and
+  deactivating yourself are each `403`, and the roster is unchanged afterwards.
+  Self is checked explicitly: it is the case a rule written as "not *another*
+  game master" would have let through, and it is the one that strands a game.
+- An administrator can still demote and deactivate the same seat, so every
+  refusal above has somewhere to go.
+- A promoted player really can run the game — the test signs in as them and
+  reads the roster, rather than believing the `is_gm` in the response.
+- The three refusals for an unusable address — nobody, an administrator, a
+  malformed string — are compared against each other and must be *identical*,
+  which is what stops the endpoint reporting which accounts exist.
+- Adding somebody already seated is a `409` that leaves their existing seat
+  alone, rather than an overwrite.
+- A player at the same table gets `403` from all three endpoints; an account
+  with no seat and an administrator get `404`; anonymous gets `401`.
 
 ### What is not covered
 

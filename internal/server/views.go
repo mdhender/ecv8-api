@@ -157,8 +157,15 @@ func newGameView(g *store.Game) gameView {
 	}
 }
 
-// membershipView is an account's role within one game.
+// membershipView is an account's seat within one game.
+//
+// PlayerID is the seat's row id, which is also the engine's player_id — the
+// same identity agentSeatView carries, because the engine must not care whether
+// a seat is held by a person or by code. It is what path-scoped endpoints
+// address a seat by, so a client that can see a roster can act on it without
+// having to send an account id back.
 type membershipView struct {
+	PlayerID    int64     `json:"player_id"`
 	GameID      int64     `json:"game_id"`
 	GameName    string    `json:"game_name"`
 	AccountID   int64     `json:"account_id"`
@@ -173,6 +180,7 @@ type membershipView struct {
 // newMembershipView renders a membership.
 func newMembershipView(m *store.Membership) membershipView {
 	return membershipView{
+		PlayerID:    m.ID,
 		GameID:      m.GameID,
 		GameName:    m.GameName,
 		AccountID:   m.AccountID,

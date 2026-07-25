@@ -328,6 +328,85 @@ func (db *DB) MembershipByID(ctx context.Context, gameID, accountID int64) (*Mem
 	return found, nil
 }
 
+// MembershipBySeatID returns one membership by its seat id, or ErrNotFound.
+//
+// The game is part of the lookup for the same reason it is in AgentSeatByID: a
+// seat id from one game must never reach a seat in another, or a path-scoped
+// endpoint is lying about what it operates on. is_agent = 0 is explicit rather
+// than left to the join, so a seat id naming an agent is "not found" here
+// instead of whatever the join happens to do with a NULL account.
+func (db *DB) MembershipBySeatID(ctx context.Context, gameID, seatID int64) (*Membership, error) {
+	var found *Membership
+	err := db.Read(ctx, func(conn *sqlite.Conn) error {
+		return sqlitex.Execute(conn,
+			`SELECT `+membershipColumns+`
+			   FROM game_player r
+			   JOIN account a ON a.id = r.account_id
+			   JOIN game    g ON g.id = r.game_id
+			  WHERE r.id = :id AND r.game_id = :game_id AND r.is_agent = 0;`,
+			&sqlitex.ExecOptions{
+				Named: map[string]any{":id": seatID, ":game_id": gameID},
+				ResultFunc: func(stmt *sqlite.Stmt) error {
+					membership, err := scanMembership(stmt)
+					if err != nil {
+						return err
+					}
+					found = &membership
+					return nil
+				},
+			})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("load membership seat: %w", err)
+	}
+	if found == nil {
+		return nil, fmt.Errorf("membership: %w", ErrNotFound)
+	}
+	return found, nil
+}
+
+// CreateMembership seats an account in a game, and fails if it already has a
+// seat there.
+//
+// This is deliberately not UpsertMembership. An administrator saving a
+// membership form is stating what the seat should be, so replacing an existing
+// row is right; a game master adding someone to their game is stating that this
+// person is not in it yet, and being wrong about that should be reported rather
+// than quietly rewriting a seat they were not looking at. The unique index on
+// (game_id, account_id) is what decides, so two simultaneous adds cannot both
+// win.
+//
+// The role is hard-coded to 'user' and is_agent to 0 for the reasons
+// UpsertMembership gives: the composite foreign key rejects an administrator
+// whatever this code believes, and saying "human seat" out loud means the row is
+// refused rather than reinterpreted if a default ever changes.
+func (db *DB) CreateMembership(ctx context.Context, gameID, accountID int64, isGM bool, now time.Time) (*Membership, error) {
+	err := db.Write(ctx, func(conn *sqlite.Conn) error {
+		return sqlitex.Execute(conn, `
+			INSERT INTO game_player (game_id, account_id, account_role, is_agent, is_gm, is_active, created_at, updated_at)
+			VALUES (:game_id, :account_id, 'user', 0, :is_gm, 1, :now, :now);`,
+			&sqlitex.ExecOptions{
+				Named: map[string]any{
+					":game_id":    gameID,
+					":account_id": accountID,
+					":is_gm":      boolToInt(isGM),
+					":now":        formatTime(now),
+				},
+			})
+	})
+	if err != nil {
+		if isUniqueViolation(err) {
+			return nil, fmt.Errorf("%w: that account is already in this game", ErrConflict)
+		}
+		if isConstraintViolation(err) {
+			return nil, fmt.Errorf("%w: the game must exist and the account must exist with the %q role",
+				ErrConflict, RoleUser)
+		}
+		return nil, fmt.Errorf("create membership: %w", err)
+	}
+	return db.MembershipByID(ctx, gameID, accountID)
+}
+
 // UpsertMembership adds or replaces an account's membership in a game.
 //
 // The composite foreign key on (account_id, account_role) means SQLite itself
