@@ -53,7 +53,7 @@ mkdir -p db
 
 # 2. Create ecv8.db and seed the first administrator.
 EC_ADMIN_EMAIL=admin@example.com EC_ADMIN_SECRET='choose-a-good-secret' \
-  go run ./cmd/ecv8-api db create --db-path db
+  go run ./cmd/ecdb create --db-path db
 
 # 3. Serve it.
 go run ./cmd/ecv8-api serve --db-path db
@@ -107,6 +107,9 @@ Flags map to environment variables by upper-casing and prefixing with `EC_`:
 
 ### Options
 
+`ecdb` accepts `--db-path` and nothing else. Every other flag below belongs to
+`ecv8-api`.
+
 | Flag | Env | Default | Meaning |
 |------|-----|---------|---------|
 | `--db-path` | `EC_DB_PATH` | `db` | Directory holding `ecv8.db`. Must exist. |
@@ -144,15 +147,27 @@ a silent authentication failure rather than an obvious one:
 
 ## Commands
 
+Two binaries are built from this module. **`ecdb` owns the database file**;
+`ecv8-api` serves HTTP.
+
 ```
+ecdb create                       create ecv8.db and seed the initial admin
+ecdb verify                       open ecv8.db read-only and print its migration
+ecdb version                      print the build version
+
 ecv8-api serve                    open the database and serve the HTTP API
-ecv8-api db create                create ecv8.db and seed the initial admin
-ecv8-api db verify                open ecv8.db read-only and print its migration
 ecv8-api version                  print the build version
 ```
 
 Every command accepts `--help`, which lists the flags in scope with their
-defaults.
+defaults. `ecdb` takes only `--db-path`: a command that never opens a listener
+should not accept `--listen-addr`, nor be refused for a `--public-base-url` it
+would never use.
+
+`ecv8-api db create` and `ecv8-api db verify` still exist and still work. They
+are the previous home of these two operations, kept while the split is in
+progress; `ecdb` is where they live now and where `backup` and `compact` will be
+added.
 
 ---
 
@@ -165,7 +180,7 @@ but cannot accidentally create a second database under a different name.
 
 ### Creating and opening
 
-`ecv8-api db create` creates the file. It fails if `ecv8.db` already exists — an
+`ecdb create` creates the file. It fails if `ecv8.db` already exists — an
 existing database is never truncated, replaced, or reopened as if it were new.
 The directory must already exist; **the store never creates a directory**, and it
 rejects an empty path, a missing path, a path that is not a directory, and a
@@ -180,7 +195,7 @@ Opening is separate and never creates anything:
 - **Writable** (`serve`): the application marker is checked, pending migrations
   are applied automatically, and WAL is asserted. A database *newer* than the
   binary is rejected without being modified.
-- **Read-only** (`db verify`, `serve --read-only`): SQLite is opened in genuine
+- **Read-only** (`ecdb verify`, `serve --read-only`): SQLite is opened in genuine
   read-only mode. No migration runs and nothing is written, so a database newer
   than the binary is perfectly acceptable — an older build can still inspect it.
 
@@ -206,8 +221,8 @@ keeps the running binary and the schema in step.
 
 ### The initial administrator
 
-`ecv8-api db create` is the **only** operation that may seed an administrator,
-and it reads exactly two variables:
+`ecdb create` is the **only** operation that may seed an administrator, and it
+reads exactly two variables:
 
 - `EC_ADMIN_EMAIL`
 - `EC_ADMIN_SECRET`
@@ -245,7 +260,8 @@ Not automated, and deliberately so. A few things worth knowing:
 ## Architecture
 
 ```
-cmd/ecv8-api/          entry point, command tree, logger construction
+cmd/ecdb/              database commands: create, verify
+cmd/ecv8-api/          server entry point, command tree, logger construction
 internal/
   cerrs/               constant sentinel errors
   config/              flags, environment, validation, precedence

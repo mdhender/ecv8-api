@@ -32,6 +32,14 @@ import (
 // EnvVarPrefix is the prefix ff uses to map flags onto environment variables.
 const EnvVarPrefix = "EC"
 
+// Defaults shared by every binary. They are constants rather than literals
+// inside Default because Database repeats them, and a server and a database
+// command that disagree about where ecv8.db lives would be a confusing failure.
+const (
+	defaultEnv    = "development"
+	defaultDBPath = "db"
+)
+
 // Config is the validated runtime configuration of the API server.
 type Config struct {
 	// Env selects which dotenv files were loaded. It is read from EC_ENV before
@@ -85,8 +93,8 @@ type Config struct {
 // Default returns the configuration used when nothing is supplied.
 func Default() Config {
 	return Config{
-		Env:        "development",
-		DBPath:     "db",
+		Env:        defaultEnv,
+		DBPath:     defaultDBPath,
 		ListenAddr: "127.0.0.1:3000",
 		// Matches the documented development origin, which is HTTPS via Caddy's
 		// internal CA. Defaulting to HTTPS keeps CookieSecure's default of true
@@ -115,8 +123,7 @@ func Bind(fs *ff.FlagSet) *Config {
 	cfg := Default()
 	def := Default()
 
-	fs.StringVar(&cfg.DBPath, 0, "db-path", def.DBPath,
-		"directory containing ecv8.db; the filename is fixed and is never created by opening")
+	bindDBPath(fs, &cfg.DBPath)
 	fs.StringVar(&cfg.Memory, 0, "memory", def.Memory,
 		"serve a seeded in-memory database with this name instead of --db-path; for development only")
 	fs.BoolVarDefault(&cfg.ReadOnly, 0, "read-only", def.ReadOnly,
@@ -163,6 +170,13 @@ func Bind(fs *ff.FlagSet) *Config {
 	fs.StringEnumVar(&cfg.LogFormat, 0, "log-format", "log output format", "text", "json")
 
 	return &cfg
+}
+
+// bindDBPath registers --db-path against target. Every binary that opens a
+// database calls it, so the flag they share is described one way everywhere.
+func bindDBPath(fs *ff.FlagSet, target *string) {
+	fs.StringVar(target, 0, "db-path", defaultDBPath,
+		"directory containing ecv8.db; the filename is fixed and is never created by opening")
 }
 
 // Validate checks the parsed configuration and reports the first problem in
