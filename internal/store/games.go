@@ -196,6 +196,7 @@ func (db *DB) UpdateGame(ctx context.Context, id int64, update GameUpdate, now t
 }
 
 const membershipColumns = `
+	r.id           AS id,
 	r.game_id      AS game_id,
 	r.account_id   AS account_id,
 	r.is_gm        AS is_gm,
@@ -209,6 +210,7 @@ const membershipColumns = `
 // scanMembership reads one row of membershipColumns.
 func scanMembership(stmt *sqlite.Stmt) (Membership, error) {
 	membership := Membership{
+		ID:          stmt.GetInt64("id"),
 		GameID:      stmt.GetInt64("game_id"),
 		AccountID:   stmt.GetInt64("account_id"),
 		Email:       stmt.GetText("email"),
@@ -227,16 +229,21 @@ func scanMembership(stmt *sqlite.Stmt) (Membership, error) {
 	return membership, nil
 }
 
-// ListMemberships returns every membership of a game, ordered by email.
+// ListMemberships returns every human membership of a game, ordered by email.
+//
+// Agent seats are excluded explicitly rather than left to the join. They have no
+// account_id, so the join against account already drops them, but a membership
+// listing that silently depended on that would break the moment the join
+// changed. Agents are the engine's players and belong to a listing of their own.
 func (db *DB) ListMemberships(ctx context.Context, gameID int64) ([]Membership, error) {
 	memberships := make([]Membership, 0, 16)
 	err := db.Read(ctx, func(conn *sqlite.Conn) error {
 		return sqlitex.Execute(conn,
 			`SELECT `+membershipColumns+`
-			   FROM game_account_role r
+			   FROM game_player r
 			   JOIN account a ON a.id = r.account_id
 			   JOIN game    g ON g.id = r.game_id
-			  WHERE r.game_id = :game_id
+			  WHERE r.game_id = :game_id AND r.is_agent = 0
 			  ORDER BY a.email;`,
 			&sqlitex.ExecOptions{
 				Named: map[string]any{":game_id": gameID},
@@ -267,7 +274,7 @@ func (db *DB) ListMembershipsForAccount(ctx context.Context, accountID int64, ac
 	err := db.Read(ctx, func(conn *sqlite.Conn) error {
 		return sqlitex.Execute(conn,
 			`SELECT `+membershipColumns+`
-			   FROM game_account_role r
+			   FROM game_player r
 			   JOIN account a ON a.id = r.account_id
 			   JOIN game    g ON g.id = r.game_id
 			  WHERE r.account_id = :account_id`+clause+`
@@ -296,7 +303,7 @@ func (db *DB) MembershipByID(ctx context.Context, gameID, accountID int64) (*Mem
 	err := db.Read(ctx, func(conn *sqlite.Conn) error {
 		return sqlitex.Execute(conn,
 			`SELECT `+membershipColumns+`
-			   FROM game_account_role r
+			   FROM game_player r
 			   JOIN account a ON a.id = r.account_id
 			   JOIN game    g ON g.id = r.game_id
 			  WHERE r.game_id = :game_id AND r.account_id = :account_id;`,
@@ -327,11 +334,15 @@ func (db *DB) MembershipByID(ctx context.Context, gameID, accountID int64) (*Mem
 // rejects an admin account here, whatever this code does. That is why the
 // insert hard-codes 'user' rather than reading the account's role: a race that
 // promoted the account to admin between check and write would still fail.
+//
+// is_agent is hard-coded to 0 for the same reason it is written at all: this
+// creates human seats, and saying so means the row is rejected rather than
+// quietly reinterpreted if the column's default ever changes.
 func (db *DB) UpsertMembership(ctx context.Context, gameID, accountID int64, isGM, isActive bool, now time.Time) (*Membership, error) {
 	err := db.Write(ctx, func(conn *sqlite.Conn) error {
 		return sqlitex.Execute(conn, `
-			INSERT INTO game_account_role (game_id, account_id, account_role, is_gm, is_active, created_at, updated_at)
-			VALUES (:game_id, :account_id, 'user', :is_gm, :is_active, :now, :now)
+			INSERT INTO game_player (game_id, account_id, account_role, is_agent, is_gm, is_active, created_at, updated_at)
+			VALUES (:game_id, :account_id, 'user', 0, :is_gm, :is_active, :now, :now)
 			ON CONFLICT (game_id, account_id) DO UPDATE
 			   SET is_gm = excluded.is_gm,
 			       is_active = excluded.is_active,

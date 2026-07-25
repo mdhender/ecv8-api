@@ -250,10 +250,49 @@ authorise on the rules in `identity`, and never assume they are the same.
 6. `gofmt -l . && go build ./... && go vet ./... && go test ./...`.
 7. Update the endpoint table in `README.md` § HTTP API.
 
+## The two domains
+
+The schema is two domains in one SQLite file, and keeping them apart is a rule,
+not an accident of naming.
+
+- **Application** (`0001`): `account`, `account_activation`, `session`, `game`.
+  Who may sign in, and what games exist.
+- **Engine** (`0002`): `game_state`, `faction`, `entity`. What is happening
+  inside a game.
+- **The seam**: `game_player`, one row per seat at a game's table.
+
+**`game_player.id` is the engine's `player_id`, and it is the only identity that
+crosses.** No engine table references `account`, and the engine must never learn
+that accounts exist — that is why `is_agent` is a column on the seat rather than
+something derived from `account_id IS NULL`. `game_id` crosses too, because
+every engine row has to be scoped to a game. Nothing else may.
+
+The id is `AUTOINCREMENT` so SQLite never reuses it. That is load-bearing: the
+value is written into engine state, and a reused one would silently reassign a
+faction to whoever sat down next. Do not replace it with a composite key.
+
+**Agents are seats, not accounts.** An agent has no `account_id` at all, so
+"this bot cannot sign in" is a schema fact. Do not implement an agent as an
+account with an unusable password hash — that makes the guarantee depend on
+bcrypt's parser rejecting a malformed value, and needs a fabricated email and
+activation timestamp to get past `0001`'s CHECKs. `account` means exactly "a
+human who can sign in", and it should stay that way.
+
+**Cross-domain rules are composite foreign keys, not Go.** `faction` carries a
+redundant `player_is_gm`, and the seat carries a redundant `account_role`, so
+that "a GM never controls a faction" and "an admin never holds a seat" are
+checked by SQLite whatever code writes the row. When a new engine table needs a
+rule like this, add the composite parent index and the redundant column; do not
+settle for a check in a handler. `0002_engine.sql` explains each one.
+
+Deleting is still not a thing. Engine tables use `ON DELETE RESTRICT` rather
+than the `CASCADE` the application tables use, so a delete that should never
+happen fails loudly instead of taking a game's state with it.
+
 ## Adding a migration
 
 New file in `internal/store/migrations/`, next ordinal, zero-padded
-(`0002_….sql`). It is embedded at build time and applied in filename order.
+(`0003_….sql`). It is embedded at build time and applied in filename order.
 
 - **Never edit a migration that has been applied.** `user_version` is the count
   of migrations applied, so an edited file is silently skipped on any existing
@@ -264,6 +303,15 @@ New file in `internal/store/migrations/`, next ordinal, zero-padded
   writing.
 - `PRAGMA application_id` (`0x65637638`) is the "this is an ECV8 database"
   marker and must never change. It is not the migration version.
+- `PRAGMA foreign_keys` is ON when migrations run (`prepareConn`), and it cannot
+  be changed inside a transaction, so a migration cannot turn it off. Order a
+  table rebuild so that nothing references the table being dropped.
+
+**Alpha: the database is disposable.** Dropping and rebuilding is expected, and
+`earl` scripts repopulate. That is a licence to change the shape freely in a new
+migration — it is *not* a licence to edit an applied one, because a developer
+whose database is at the older `user_version` would silently skip the edit and
+end up with a schema nobody else has.
 
 ## Adding a configuration option
 
@@ -318,8 +366,11 @@ The brief rules these out, and "no" is the finished answer, not a gap to fill:
 - email delivery: the application never sends mail. An activation URL is
   returned once for an administrator to deliver out of band.
 - public web-based registration: administrators create every account
-- gameplay. `internal/engine` exists only to fix the PRNG invariant; it invents
-  no game rules.
+
+**Gameplay is no longer on this list.** The brief ruled it out and that has been
+superseded: engine development started on 2026-07-25 with migration `0002`. Do
+not reinstate "gameplay is out of scope" from the brief or from an older
+comment — see § The two domains.
 
 **Do not add speculative abstractions for any of these** — no hook, no
 interface, no config flag held open for a feature that is not being built. If a

@@ -50,7 +50,15 @@ type Game struct {
 
 // Membership links a user account to a game. Admin accounts can never appear
 // here: the database enforces it through a composite foreign key.
+//
+// It describes a human seat. game_player also holds agent seats, which have no
+// account and are played by the engine; those are not memberships and have no
+// HTTP surface yet.
 type Membership struct {
+	// ID is the seat's row id, which is the engine's player_id. It is the only
+	// identity that crosses into the engine domain — nothing under the engine
+	// references an account.
+	ID          int64
 	GameID      int64
 	AccountID   int64
 	Email       string

@@ -23,6 +23,7 @@ parent repository above the two.
   - [The shared session](#the-shared-session)
 - [The database](#the-database)
   - [Creating and opening](#creating-and-opening)
+  - [Two domains, one file](#two-domains-one-file)
   - [Migrations](#migrations)
   - [The initial administrator](#the-initial-administrator)
   - [Backups](#backups)
@@ -338,11 +339,52 @@ It is **not** the migration version, which lives in `PRAGMA user_version`.
 Opening a SQLite file that is not an ECV8 database fails with a clear error
 rather than being migrated into one.
 
+### Two domains, one file
+
+The schema is two domains, and one table bridges them:
+
+```
+application            seam                engine
+-----------            ----                ------
+account            game_player          game_state    turn, PCG seeds
+account_activation   .id is the         faction       controlled by a player_id
+session               engine's          entity        a ship or a colony
+game                  player_id
+```
+
+**`game_player.id` is the engine's `player_id`, and it is the only identity that
+crosses.** No engine table references `account`; the engine never needs to know
+that accounts exist. `game_id` crosses as well, because every engine row has to
+be scoped to a game.
+
+A seat is held by a **human** — which is an account — or by an **agent**, which
+the engine plays itself and which has no account at all. That is what makes "an
+agent cannot sign in" a fact about the schema rather than a property of some
+unusable password value, and it keeps `account` meaning exactly "a human who can
+sign in".
+
+Both domains live in one SQLite file, so the separation is a discipline rather
+than something the storage enforces. The compensation is composite foreign keys,
+which turn rules that would otherwise live in Go into things SQLite checks: a
+faction's controller is seated in the *same* game, that controller is not the
+game master, an entity's faction is in the same game, an admin never holds a
+seat. `internal/store/migrations/0002_engine.sql` explains each one where it is
+declared.
+
+Engine tables use `ON DELETE RESTRICT` rather than the `CASCADE` the application
+tables use. Nothing here is deleted, only deactivated, so a delete reaching an
+engine table is a mistake and fails loudly instead of taking a game's state with
+it.
+
 ### Migrations
 
 Migrations are SQL files embedded in the binary and applied by ZombieZen's
 `sqlitemigration` in filename order. A database's `user_version` is the count of
 migrations applied to it.
+
+- `0001_initial.sql` — the application domain.
+- `0002_engine.sql` — the engine domain, and the rebuild of `game_account_role`
+  into `game_player`.
 
 - Writable opens migrate forward automatically.
 - Read-only opens never migrate.
@@ -393,7 +435,8 @@ internal/
   cerrs/               constant sentinel errors
   config/              flags, environment, validation, precedence
   dotenv/              dotenv loading, patterned after ../ecv7
-  engine/              game-engine foundation: math/rand/v2 with PCG
+  engine/              game-engine foundation: math/rand/v2 with PCG; its state
+                       is the engine domain, keyed by player_id
   password/            bcrypt hashing at MinCost, 3-128 byte policy
   server/              Echo v5 routes, middleware, handlers, Problem Details
   store/               every SQLite database, migrations, queries, seeding
@@ -427,10 +470,12 @@ Notable choices:
 - **Pragmas are per-connection**, so `foreign_keys`, `busy_timeout`, and (for
   read-only pools) `query_only` are applied in the pool's `PrepareConn` hook. A
   connection opened lazily later cannot silently omit them.
-- **The game engine** exists only to establish one invariant: game randomness
-  comes from `math/rand/v2` with a PCG source, seeded reproducibly. The legacy
-  `math/rand` is not imported anywhere. Security material comes from
-  `internal/tokens`, which uses `crypto/rand`; the two must never be swapped.
+- **The game engine** establishes one invariant: game randomness comes from
+  `math/rand/v2` with a PCG source, seeded reproducibly, so a turn can be
+  replayed. The legacy `math/rand` is not imported anywhere. Security material
+  comes from `internal/tokens`, which uses `crypto/rand`; the two must never be
+  swapped. Its state is the engine domain described above, reachable through
+  `player_id` without knowing that accounts exist.
 
 ---
 
