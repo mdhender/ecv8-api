@@ -41,6 +41,20 @@ type Seed struct {
 	Lo uint64
 }
 
+// DefaultSeed is the stream a game starts from when nobody chooses one.
+//
+// It lives here rather than in a handler or the client because the engine owns
+// what a seed means: one default in one place is what keeps every path that
+// omits a seed producing the same game, and a game master setting a game up has
+// no reason to invent two numbers before they can begin.
+//
+// The values themselves are arbitrary and are not a security parameter — this
+// generator is reproducible by design, and anything that must be unguessable
+// comes from internal/tokens instead. A memorable pair is worth more here than
+// an unpredictable one: it is recognisable in a bug report, and it makes an
+// unset seed obvious at a glance.
+func DefaultSeed() Seed { return Seed{Hi: 19, Lo: 42} }
+
 // Engine is the root of a game's deterministic state. It currently carries only
 // its random source.
 type Engine struct {

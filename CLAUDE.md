@@ -248,6 +248,15 @@ authorisation boundary; the client's route guards are UX. `identity.Actor` is
 who logged in, `identity.Effective` is who the request acts as — log the actor,
 authorise on the rules in `identity`, and never assume they are the same.
 
+**A game endpoint authorises on the seat, not the role.** Everything under
+`/api/v1/games` resolves the caller's `game_player` row and decides from that;
+`requireAuth` only establishes that somebody is signed in. An administrator
+holds no seat — the schema forbids it — so an administrator is not a player and
+reaches none of it. Do not "fix" that with a role check: an administrator who
+needs a player's view impersonates them, which is what impersonation is for. A
+caller with no seat is answered `404`, never `403`, because telling them a game
+exists is the one thing they could learn by probing ids.
+
 ## Adding an endpoint — the whole checklist
 
 1. Handler in the matching `internal/server/handlers_*.go`, with a comment

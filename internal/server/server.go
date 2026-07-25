@@ -248,6 +248,13 @@ func (s *Server) routes() {
 	me.PUT("/password", s.handleChangePassword)
 	me.GET("/games", s.handleMyGames)
 
+	// Games as their players see them. The guard is only requireAuth because
+	// the real boundary is the seat, which the handlers resolve per game: an
+	// administrator holds no seat and so reaches none of these.
+	games := api.Group("/games", s.requireAuth)
+	games.GET("/:gameID", s.handleGetPlayerGame)
+	games.POST("/:gameID/state", s.handleCreateGameState)
+
 	admin := api.Group("/admin", s.requireAdmin)
 	admin.GET("/accounts", s.handleListAccounts)
 	admin.POST("/accounts", s.handleCreateAccount)

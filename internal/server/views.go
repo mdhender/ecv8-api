@@ -3,6 +3,7 @@
 package server
 
 import (
+	"strconv"
 	"time"
 
 	"github.com/mdhender/ecv8-api/internal/engine"
@@ -182,6 +183,68 @@ func newMembershipView(m *store.Membership) membershipView {
 		CreatedAt:   m.CreatedAt,
 		UpdatedAt:   m.UpdatedAt,
 	}
+}
+
+// seedView is the pair of words a game's random stream is built from.
+//
+// Both are decimal **strings** rather than JSON numbers, and that is the one
+// place this API departs from sending an integer as an integer. A seed word is
+// a full-range uint64; a JSON number is an IEEE 754 double in every browser, so
+// any value above 2^53 would reach the client rounded and come back changed. A
+// seed that does not round-trip exactly makes a game unreplayable, which is the
+// single property internal/engine exists to guarantee, so the wire format gives
+// that up before it gives up exactness.
+type seedView struct {
+	Hi string `json:"hi"`
+	Lo string `json:"lo"`
+}
+
+// newSeedView renders a seed for the wire.
+func newSeedView(s engine.Seed) seedView {
+	return seedView{
+		Hi: strconv.FormatUint(s.Hi, 10),
+		Lo: strconv.FormatUint(s.Lo, 10),
+	}
+}
+
+// gameStateView is how far a game has got.
+type gameStateView struct {
+	GameID    int64     `json:"game_id"`
+	Turn      int       `json:"turn"`
+	Seed      seedView  `json:"seed"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// newGameStateView renders a game's state.
+func newGameStateView(s *store.GameState) gameStateView {
+	return gameStateView{
+		GameID:    s.GameID,
+		Turn:      s.Turn,
+		Seed:      seedView{Hi: strconv.FormatUint(s.SeedHi, 10), Lo: strconv.FormatUint(s.SeedLo, 10)},
+		CreatedAt: s.CreatedAt,
+		UpdatedAt: s.UpdatedAt,
+	}
+}
+
+// playerGameView is one game as the account seated at it sees it.
+//
+// State is null until a game master has set the game up. The client shows a
+// different page in each case — a player is told to come back later, a game
+// master is given the form — so the distinction has to survive onto the wire
+// rather than being flattened into an empty state object.
+//
+// DefaultSeed is present only when this caller can act on it: the game master
+// of a game with no state. It exists to fill in that one form, so sending it to
+// a player who cannot submit the form would only invite the question of what
+// they are supposed to do with it.
+type playerGameView struct {
+	ID          int64          `json:"id"`
+	Name        string         `json:"name"`
+	IsActive    bool           `json:"is_active"`
+	IsGM        bool           `json:"is_gm"`
+	State       *gameStateView `json:"state"`
+	DefaultSeed *seedView      `json:"default_seed,omitempty"`
 }
 
 // agentView is one agent this build can play, as offered to a game master

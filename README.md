@@ -624,6 +624,58 @@ silently ignored field.
 | `PUT` | `/me/password` | Change the password. Requires the current one; revokes all other sessions. |
 | `GET` | `/me/games` | Active memberships. |
 
+### Games, as their players see them
+
+**Authorisation here is the seat, not the role.**
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/games/{id}` | One game, its state, and whether you are its game master. |
+| `POST` | `/games/{id}/state` | Set the game up: write its initial state at turn 0. Game master only. |
+
+An administrator can never hold a seat — a composite foreign key forbids it — so
+an administrator reaches neither of these. That is deliberate and matches the
+rest of the service: admin rights stop at impersonation, and an administrator who
+needs a player's view impersonates them. An account with no seat is answered
+`404`, not `403`, because "there is a game here you may not see" is itself
+something about a game they are not in. A deactivated *seat* is answered the same
+way; a deactivated *game* is not, and stays readable with `is_active: false` by
+the people who played it.
+
+`GET` returns `state: null` until the game has been set up, which is an ordinary
+stage of a game's life rather than a failure. Alongside it, and **only** for the
+game master of a game in that state, comes `default_seed` — the values the setup
+form starts from:
+
+```json
+{
+  "data": {
+    "id": 3, "name": "Alpha", "is_active": true, "is_gm": true,
+    "state": null,
+    "default_seed": { "hi": "19", "lo": "42" }
+  }
+}
+```
+
+`POST /games/{id}/state` takes an optional `seed`:
+
+```json
+{ "seed": { "hi": "19", "lo": "42" } }
+```
+
+Omitting it is the ordinary case and yields the same default, which comes from
+`engine.DefaultSeed` so the value written and the value offered cannot drift
+apart. A second call is `409`, not an overwrite: the seed is what makes every
+later turn reproducible, so replacing it after play began would invalidate the
+turns already resolved. Setting up an inactive game is `409` too.
+
+**Seed words are decimal strings, not JSON numbers.** This is the one place the
+API sends an integer as a string. A seed word is a full-range `uint64` and a JSON
+number is an IEEE 754 double in every browser, so anything above 2^53 would reach
+the client rounded and come back changed — and a seed that does not round-trip
+exactly makes a game unreplayable, which is the single property
+`internal/engine` exists to guarantee.
+
 ### Administration
 
 All require an administrator who is **not** impersonating.
@@ -830,6 +882,7 @@ Covered today:
 | `internal/store/agents_test.go` | Agent seats, and the schema constraints that hold whatever code writes a row. |
 | `internal/store/seed_test.go` | A PCG seed's round trip through SQLite's signed `INTEGER`. |
 | `internal/server/handlers_admin_agents_test.go` | The agent endpoints: statuses, validation, scoping, and authorisation. |
+| `internal/server/handlers_games_test.go` | The player-facing game endpoints: who sees a game, and setting one up. |
 
 ### The database commands
 
@@ -891,8 +944,33 @@ pass every in-memory check and lose the low bits. A seed that does not
 round-trip exactly makes a game unreplayable, which is the one property
 `internal/engine` exists to guarantee.
 
+### Setting a game up
+
+`handlers_games_test.go` covers the endpoints a player uses, and its subject is
+as much *who* gets an answer as what the answer is. Every case is a different
+seeded account with a real session cookie — a player, that game's master, an
+account seated elsewhere, an administrator — rather than one account with a flag
+flipped, because the boundary being tested is the seat and nothing else.
+
+What it holds:
+
+- A game with no state answers `state: null`, and only its game master is given
+  the `default_seed` the setup form starts from. It stops being offered once the
+  game has been set up.
+- Omitting the seed writes `engine.DefaultSeed` at turn 0, so the value the form
+  offers and the value the API writes are checked against the same source.
+- A seed of 2^64 − 1 and one of 2^53 + 1 survive the round trip **as sent**.
+  This is the case the string wire format exists for; a JSON number would round
+  both.
+- A negative, fractional, overflowing, or empty seed word is a `422` naming
+  `seed.hi` or `seed.lo`.
+- A player at the same table cannot set the game up, a second setup is `409` and
+  leaves the first seed in place, and an unseated account — including an
+  administrator — gets `404` from both endpoints rather than `403`.
+- A seat deactivated after the fact stops being able to read the game.
+
 ### What is not covered
 
-Accounts, sessions, activation, games, and the rest of the endpoints have no
-tests. The generated placeholders were removed rather than kept as meaningless
-green checks. Adding coverage needs no permission — when you do, list it above.
+Accounts, sessions, activation, and the administrative endpoints have no tests.
+The generated placeholders were removed rather than kept as meaningless green
+checks. Adding coverage needs no permission — when you do, list it above.

@@ -70,6 +70,25 @@ type Membership struct {
 	UpdatedAt   time.Time
 }
 
+// GameState is how far a game has got: the engine domain's root row.
+//
+// A game exists from the moment an administrator creates it; its state exists
+// only once a game master has set it up. The two are deliberately separate, and
+// the absence of a state is a real condition rather than a missing default —
+// it is what tells a player the game is not ready. Turn 0 is setup.
+//
+// The seed words are uint64 here and signed INTEGERs on disk. formatSeed and
+// parseSeed are the only place that conversion happens; see the comment above
+// them for why the bit pattern rather than the value is what is preserved.
+type GameState struct {
+	GameID    int64
+	Turn      int
+	SeedHi    uint64
+	SeedLo    uint64
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 // AgentSeat is a seat played by the engine rather than by a person. It has no
 // account: that is what makes "an agent cannot sign in" a fact about the
 // schema rather than a property of some unusable credential.
