@@ -13,17 +13,23 @@ import (
 	"time"
 )
 
-// credential is one saved session: the cookie value the server issued, and when
-// it expires.
+// credential is one saved session: the cookie the server issued, the name it
+// arrived under, and when it expires.
 //
 // The cookie value is a live session token. The server stores only its
 // fingerprint and cannot recover it, so this file is the only copy — and anyone
 // who reads it is signed in as that account until it expires. That is why the
 // file is 0600 inside a 0700 directory, and why nothing in earl ever prints
 // this field.
+//
+// CookieName is saved with it because the server's cookie name is
+// configurable, and earl learns it from the login response rather than being
+// told. Saving it is what lets later requests send the cookie back correctly
+// without the caller having to know the name either.
 type credential struct {
-	Cookie    string    `json:"cookie"`
-	ExpiresAt time.Time `json:"expires_at"`
+	Cookie     string    `json:"cookie"`
+	CookieName string    `json:"cookie_name"`
+	ExpiresAt  time.Time `json:"expires_at"`
 }
 
 // expired reports whether the saved expiry has passed. It is advisory: the

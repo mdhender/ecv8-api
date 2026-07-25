@@ -32,6 +32,12 @@
 // can hold several identities at once (an administrator and an ordinary user,
 // say) and pick between them with --email.
 //
+// The server's cookie name is configurable, and earl does not have to be told
+// it: a successful login sets exactly one cookie, so whatever arrives is the
+// session, and its name is saved alongside it for later requests. --cookie-name
+// exists only to break a tie when something in front of the API — a load
+// balancer adding a routing cookie — makes "the only cookie" ambiguous.
+//
 // The saved value is a live session token. Anyone holding it is signed in as
 // that account until it expires, so the file is written 0600 in a 0700
 // directory, and earl never prints it, logs it, or echoes it in an error — the
@@ -93,9 +99,9 @@ const (
 	// so --base-url https://ec.example.com does the obvious thing.
 	defaultAPIPath = "/api/v1"
 
-	// defaultCookieName matches the server's --cookie-name default. A server
-	// configured with a different name needs --cookie-name to match, because
-	// the cookie earl is looking for in the login response is named by it.
+	// defaultCookieName matches the server's --cookie-name default. earl learns
+	// the real name from the login response, so this is only the last-resort
+	// fallback for a saved session from before names were recorded.
 	defaultCookieName = "ec_session"
 )
 
@@ -167,8 +173,11 @@ func command(env string) *ff.Command {
 		"API base URL; "+defaultAPIPath+" is appended when it carries no path of its own")
 	rootFlags.StringVar(&email, 0, "email", "",
 		"account whose saved session to use; required only when several are saved")
-	rootFlags.StringVar(&cookieName, 0, "cookie-name", defaultCookieName,
-		"name of the session cookie; must match the server's --cookie-name")
+	// Empty by default so "not given" is distinguishable from "given as the
+	// usual name". Login learns the name from the response; this only settles
+	// which cookie is the session when something else set one too.
+	rootFlags.StringVar(&cookieName, 0, "cookie-name", "",
+		"which cookie carries the session; needed only if the login response sets more than one")
 	rootFlags.DurationVar(&timeout, 0, "timeout", 30*time.Second,
 		"how long to wait for a response")
 	rootFlags.BoolVarDefault(&verbose, 0, "verbose", false,

@@ -60,20 +60,20 @@ func newHTTPClient(timeout time.Duration, insecure bool) *http.Client {
 // response body to out; anything else is an error carrying the status and the
 // server's Problem document.
 func (e *earl) request(ctx context.Context, method, path string, body []byte, noAuth bool) error {
-	var cookie string
+	var session credential
 	if !noAuth {
 		store, err := e.loadCredentials()
 		if err != nil {
 			return err
 		}
-		who, credential := store.resolve(e.baseURL, e.email)
-		cookie = credential.Cookie
-		if cookie != "" && e.verbose {
+		who, saved := store.resolve(e.baseURL, e.email)
+		session = saved
+		if session.Cookie != "" && e.verbose {
 			fmt.Fprintf(e.errOut, "# as %s\n", who)
 		}
 	}
 
-	status, respBody, _, err := e.do(ctx, method, path, body, cookie)
+	status, respBody, _, err := e.do(ctx, method, path, body, session)
 	if err != nil {
 		return err
 	}
@@ -85,8 +85,9 @@ func (e *earl) request(ctx context.Context, method, path string, body []byte, no
 // and logout.
 //
 // The session is attached as a cookie because that is the only credential this
-// API accepts; there is no bearer scheme to fall back on.
-func (e *earl) do(ctx context.Context, method, path string, body []byte, cookie string) (int, []byte, *http.Response, error) {
+// API accepts; there is no bearer scheme to fall back on. A zero session sends
+// the request anonymously.
+func (e *earl) do(ctx context.Context, method, path string, body []byte, session credential) (int, []byte, *http.Response, error) {
 	target := joinURL(e.baseURL, path)
 
 	var reader io.Reader
@@ -104,15 +105,15 @@ func (e *earl) do(ctx context.Context, method, path string, body []byte, cookie 
 	// The server records the user agent on the session row, so saying who we
 	// are makes an earl session identifiable in an admin session listing.
 	request.Header.Set("User-Agent", "earl/"+version.Version.String())
-	if cookie != "" {
-		request.AddCookie(&http.Cookie{Name: e.cookieName, Value: cookie})
+	if session.Cookie != "" {
+		request.AddCookie(&http.Cookie{Name: e.cookieNameFor(session), Value: session.Cookie})
 	}
 
 	if e.verbose {
 		// The cookie is deliberately absent from this line, and from every
 		// other thing earl writes.
 		fmt.Fprintf(e.errOut, "> %s %s (authenticated=%t, body=%d bytes)\n",
-			method, target, cookie != "", len(body))
+			method, target, session.Cookie != "", len(body))
 	}
 
 	response, err := e.http.Do(request)
@@ -157,15 +158,78 @@ func (e *earl) writeBody(body []byte) {
 	fmt.Fprintln(e.out, strings.TrimRight(formatJSON(body, isTerminal(e.out)), "\n"))
 }
 
-// sessionCookie returns the value of the session cookie in a response, or "" if
-// the server did not set one.
-func (e *earl) sessionCookie(response *http.Response) *http.Cookie {
+// sessionCookie picks the session cookie out of a login response.
+//
+// earl does not need to be told the server's cookie name: a successful login
+// sets exactly one cookie, so whatever arrives is the session. That keeps a
+// configurable server setting from being something the caller has to discover
+// and repeat.
+//
+// The case that needs care is a load balancer adding a cookie of its own — an
+// ALB's AWSALB, say — which would make "the only cookie" ambiguous. Rather than
+// guess, and risk sending a routing cookie as a credential and saving the real
+// session nowhere, earl names the candidates and asks for --cookie-name. An
+// explicit --cookie-name always wins outright, so a caller who knows can say so
+// and never depend on this reasoning at all.
+func (e *earl) sessionCookie(response *http.Response) (*http.Cookie, error) {
+	var candidates []*http.Cookie
 	for _, cookie := range response.Cookies() {
-		if cookie.Name == e.cookieName && cookie.Value != "" {
-			return cookie
+		if cookie.Value != "" {
+			candidates = append(candidates, cookie)
 		}
 	}
-	return nil
+
+	if e.cookieName != "" {
+		for _, cookie := range candidates {
+			if cookie.Name == e.cookieName {
+				return cookie, nil
+			}
+		}
+		return nil, fmt.Errorf("login succeeded but set no %q cookie%s; "+
+			"check --cookie-name against the server's --cookie-name",
+			e.cookieName, cookieNameList(candidates))
+	}
+
+	switch len(candidates) {
+	case 0:
+		return nil, fmt.Errorf("login succeeded but set no cookie, so there is no session to save")
+	case 1:
+		return candidates[0], nil
+	default:
+		return nil, fmt.Errorf("login set several cookies%s; "+
+			"pass --cookie-name to say which one is the session",
+			cookieNameList(candidates))
+	}
+}
+
+// cookieNameFor returns the name to send a saved session back under.
+//
+// The name saved at login is authoritative. An explicit --cookie-name is the
+// fallback, and the documented default the last resort, so a credential file
+// written before names were saved still works instead of failing in a way that
+// looks like an expired session.
+func (e *earl) cookieNameFor(session credential) string {
+	if session.CookieName != "" {
+		return session.CookieName
+	}
+	if e.cookieName != "" {
+		return e.cookieName
+	}
+	return defaultCookieName
+}
+
+// cookieNameList renders the cookie names a response set, for an error message
+// that tells the caller what there was to choose between. Only names are
+// listed; a cookie's value is never shown.
+func cookieNameList(cookies []*http.Cookie) string {
+	if len(cookies) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(cookies))
+	for _, cookie := range cookies {
+		names = append(names, cookie.Name)
+	}
+	return " (it set: " + strings.Join(names, ", ") + ")"
 }
 
 // normalizeBaseURL validates --base-url and fills in the API path when the URL

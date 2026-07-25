@@ -204,6 +204,14 @@ several identities can be held at once and `--email` picks between them. **The
 saved value is a live session token**, so the file is `0600` in a `0700`
 directory and `earl` never prints it. `EARL_CREDENTIALS` overrides the path.
 
+`earl` does not need to be told the cookie's name, even though `--cookie-name`
+makes it configurable: a login sets exactly one cookie, so whatever arrives is
+the session, and its name is saved with it for later requests. `--cookie-name`
+is only a tie-breaker for when something in front of the API — a load balancer
+adding a routing cookie — sets one too. Faced with two, `earl` names them and
+stops rather than guessing, because guessing would mean sending a routing cookie
+as a credential and saving no session at all.
+
 Its own flags read `EARL_`-prefixed variables rather than `EC_`, so pointing the
 client at another host never means touching a server's configuration. `EC_ENV`
 is shared, because a checkout has one idea of which environment it is in.

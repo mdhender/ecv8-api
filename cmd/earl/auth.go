@@ -37,7 +37,7 @@ func (e *earl) login(ctx context.Context, password string) error {
 		return fmt.Errorf("encode login request: %w", err)
 	}
 
-	status, respBody, response, err := e.do(ctx, http.MethodPost, "/session", body, "")
+	status, respBody, response, err := e.do(ctx, http.MethodPost, "/session", body, credential{})
 	if err != nil {
 		return err
 	}
@@ -45,12 +45,9 @@ func (e *earl) login(ctx context.Context, password string) error {
 		return e.emit(http.MethodPost, "/session", status, respBody)
 	}
 
-	cookie := e.sessionCookie(response)
-	if cookie == nil {
-		// Almost certainly --cookie-name disagreeing with the server's, since a
-		// successful login always sets the cookie.
-		return fmt.Errorf("login succeeded but no %q cookie was returned; "+
-			"check --cookie-name against the server's --cookie-name", e.cookieName)
+	cookie, err := e.sessionCookie(response)
+	if err != nil {
+		return err
 	}
 
 	// Prefer the cookie's own expiry, which is what the server will enforce.
@@ -68,7 +65,11 @@ func (e *earl) login(ctx context.Context, password string) error {
 	if err != nil {
 		return err
 	}
-	store.put(e.baseURL, email, credential{Cookie: cookie.Value, ExpiresAt: expiresAt})
+	store.put(e.baseURL, email, credential{
+		Cookie:     cookie.Value,
+		CookieName: cookie.Name,
+		ExpiresAt:  expiresAt,
+	})
 	if err := e.saveCredentials(store); err != nil {
 		return err
 	}
@@ -100,7 +101,7 @@ func (e *earl) logout(ctx context.Context) error {
 		return e.noSessionError(store)
 	}
 
-	status, respBody, _, err := e.do(ctx, http.MethodDelete, "/session", nil, saved.Cookie)
+	status, respBody, _, err := e.do(ctx, http.MethodDelete, "/session", nil, saved)
 	if err != nil {
 		return err
 	}
