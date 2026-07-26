@@ -216,23 +216,37 @@ func newSeedView(s engine.Seed) seedView {
 }
 
 // gameStateView is how far a game has got.
+//
+// Seed is absent unless the caller is the game's master. The stream is
+// reproducible by design — that is the whole point of internal/engine — so a
+// player who knows the seed can run the generator forward and read the outcome
+// of events before they are resolved. Turn resolution being auditable is for
+// the person running the game, not for the people playing against it.
 type gameStateView struct {
 	GameID    int64     `json:"game_id"`
 	Turn      int       `json:"turn"`
-	Seed      seedView  `json:"seed"`
+	Seed      *seedView `json:"seed,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // newGameStateView renders a game's state.
-func newGameStateView(s *store.GameState) gameStateView {
-	return gameStateView{
+//
+// withSeed has no default and is not derived from the state, because the
+// question it answers is about the caller: only a game master may see the seed.
+// Every call site has to say which it is holding, so a new one cannot leak the
+// seed by forgetting the rule existed.
+func newGameStateView(s *store.GameState, withSeed bool) gameStateView {
+	view := gameStateView{
 		GameID:    s.GameID,
 		Turn:      s.Turn,
-		Seed:      seedView{Hi: strconv.FormatUint(s.SeedHi, 10), Lo: strconv.FormatUint(s.SeedLo, 10)},
 		CreatedAt: s.CreatedAt,
 		UpdatedAt: s.UpdatedAt,
 	}
+	if withSeed {
+		view.Seed = &seedView{Hi: strconv.FormatUint(s.SeedHi, 10), Lo: strconv.FormatUint(s.SeedLo, 10)}
+	}
+	return view
 }
 
 // playerGameView is one game as the account seated at it sees it.
@@ -245,7 +259,9 @@ func newGameStateView(s *store.GameState) gameStateView {
 // DefaultSeed is present only when this caller can act on it: the game master
 // of a game with no state. It exists to fill in that one form, so sending it to
 // a player who cannot submit the form would only invite the question of what
-// they are supposed to do with it.
+// they are supposed to do with it. Once the game has been set up, State carries
+// the seed under the same rule and for the stronger reason gameStateView gives:
+// a player who has it can predict the game.
 type playerGameView struct {
 	ID          int64          `json:"id"`
 	Name        string         `json:"name"`

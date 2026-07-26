@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/mdhender/ecv8-api/internal/config"
@@ -73,7 +74,9 @@ type playerGameResponse struct {
 	State    *struct {
 		GameID int64 `json:"game_id"`
 		Turn   int   `json:"turn"`
-		Seed   struct {
+		// A pointer, because absent and present are the two answers the seed
+		// rule produces and a value would flatten them into one.
+		Seed *struct {
 			Hi string `json:"hi"`
 			Lo string `json:"lo"`
 		} `json:"seed"`
@@ -213,9 +216,61 @@ func TestCreateGameStateRoundTripsALargeSeed(t *testing.T) {
 	if game.State == nil {
 		t.Fatal("state is null after it was created")
 	}
+	if game.State.Seed == nil {
+		t.Fatal("seed is absent from the game master's own view of the game")
+	}
 	if game.State.Seed.Hi != hi || game.State.Seed.Lo != lo {
 		t.Errorf("seed = %s/%s, want %s/%s exactly",
 			game.State.Seed.Hi, game.State.Seed.Lo, hi, lo)
+	}
+}
+
+// The seed is the game master's private information. The engine is reproducible
+// from it by design, so a player who could read it could run the generator
+// forward and know the outcome of a turn before it was resolved. Everything else
+// about the state is the same for everybody at the table, which is what makes
+// this worth a test of its own: the field has to disappear while its neighbours
+// stay.
+func TestPlayerDoesNotSeeTheSeed(t *testing.T) {
+	srv, admin, db := testServer(t)
+	gameID := createGame(t, srv, admin, "Seeded")
+	seatAccount(t, srv, admin, db, gameID, "gm1@example.com", true)
+	seatAccount(t, srv, admin, db, gameID, "user1@example.com", false)
+	gm := signIn(t, db, "gm1@example.com")
+
+	recorder := do(t, srv, gm, http.MethodPost, "/api/v1/games/"+itoa(gameID)+"/state",
+		`{"seed":{"hi":"1234","lo":"5678"}}`)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body %s", recorder.Code, recorder.Body.String())
+	}
+
+	player := getGame(t, srv, signIn(t, db, "user1@example.com"), gameID)
+	if player.State == nil {
+		t.Fatal("state is null for a player of a game that has been set up")
+	}
+	if player.State.Seed != nil {
+		t.Errorf("seed = %+v, want absent for a player", player.State.Seed)
+	}
+	if player.State.Turn != 0 {
+		t.Errorf("turn = %d, want 0; a player still sees how far the game has got", player.State.Turn)
+	}
+
+	// The same request from the game master's seat carries it, so the absence
+	// above is the seat rule and not a state that was rendered without a seed.
+	master := getGame(t, srv, gm, gameID)
+	if master.State == nil || master.State.Seed == nil {
+		t.Fatal("seed is absent from the game master's own view of the game")
+	}
+	if master.State.Seed.Hi != "1234" || master.State.Seed.Lo != "5678" {
+		t.Errorf("seed = %s/%s, want 1234/5678", master.State.Seed.Hi, master.State.Seed.Lo)
+	}
+
+	// The whole point is that the value never reaches the player, so check the
+	// bytes as well: a nil field on a struct proves the shape, not the payload.
+	body := do(t, srv, signIn(t, db, "user1@example.com"), http.MethodGet,
+		"/api/v1/games/"+itoa(gameID), "").Body.String()
+	if strings.Contains(body, "1234") || strings.Contains(body, "5678") {
+		t.Errorf("a seed word appears in the player's response body: %s", body)
 	}
 }
 

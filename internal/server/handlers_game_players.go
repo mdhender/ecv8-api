@@ -25,6 +25,14 @@ import (
 // written from memory would be the one that let a game master quietly demote
 // the person who invited them, or leave a game with nobody able to run it.
 //
+// Demotion is the case with the sharpest reason behind it, and it is about
+// knowledge rather than rank: a game master has seen the game's seed, and a
+// change of seat cannot make them forget it. The engine is reproducible from
+// that value, so a demoted game master sitting down as a player would be a
+// player who can predict the game — and the roster would show nothing unusual.
+// That is why the demotion an administrator can perform is a deliberate
+// decision by somebody who holds no seat, and not a control on this page.
+//
 // An administrator is not bound by any of it: PUT /admin/games/{id}/memberships
 // still sets any seat to any state, which is the escape hatch that makes the
 // restriction here safe to be strict.

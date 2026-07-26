@@ -80,6 +80,11 @@ func (s *Server) gameMasterSeat(c *echo.Context, gameID int64) (*store.Game, *st
 // administrator creates it and is set up separately by its game master. The
 // response says so with a null state, and carries the seed the setup form
 // starts from when — and only when — this caller is the one who can submit it.
+//
+// The seat also decides whether the state's seed travels at all. Every other
+// field here is the same for everybody at the table; the seed is the game
+// master's alone, because the engine is reproducible from it and a player
+// holding it could resolve a turn before the game does.
 func (s *Server) handleGetPlayerGame(c *echo.Context) error {
 	gameID, err := pathID(c, "gameID")
 	if err != nil {
@@ -100,7 +105,7 @@ func (s *Server) handleGetPlayerGame(c *echo.Context) error {
 	state, err := s.db.GameStateByGameID(c.Request().Context(), gameID)
 	switch {
 	case err == nil:
-		rendered := newGameStateView(state)
+		rendered := newGameStateView(state, seat.IsGM)
 		view.State = &rendered
 	case errors.Is(err, store.ErrNotFound):
 		if seat.IsGM {
@@ -197,13 +202,16 @@ func (s *Server) handleCreateGameState(c *echo.Context) error {
 		return s.storeError(err, "game state")
 	}
 	// The seed is logged deliberately. It is not a credential — internal/tokens
-	// mints everything that is, and this generator is reproducible by design —
-	// and it is the one value an operator needs in order to replay a turn and
-	// check what the engine did.
+	// mints everything that is — and it is the one value an operator needs in
+	// order to replay a turn and check what the engine did. That it is withheld
+	// from players on the wire is a different rule: reproducibility is for the
+	// people auditing the game, and the log is theirs, not a player's.
 	s.log.Info("game set up",
 		"game_id", gameID, "turn", state.Turn,
 		"seed_hi", state.SeedHi, "seed_lo", state.SeedLo,
 		"actor_id", identityOf(c).Actor.ID)
 
-	return c.JSON(http.StatusCreated, envelope{Data: newGameStateView(state)})
+	// gameMasterSeat is the only way in, so the seed goes back: the game master
+	// chose it, or accepted the default, and needs to be able to record it.
+	return c.JSON(http.StatusCreated, envelope{Data: newGameStateView(state, true)})
 }

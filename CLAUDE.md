@@ -257,6 +257,14 @@ needs a player's view impersonates them, which is what impersonation is for. A
 caller with no seat is answered `404`, never `403`, because telling them a game
 exists is the one thing they could learn by probing ids.
 
+**A game's seed goes to its game master and to nobody else.** It is not a
+credential, so the reflex is to treat it as ordinary state and send it with the
+rest — don't. The engine is reproducible from it by design, so a player holding
+one can run the stream forward and read the outcome of events before they are
+resolved. `newGameStateView` takes an explicit `withSeed` for that reason: every
+call site has to say whose seat it is rendering for. It stays in the log, which
+is an operator's.
+
 ## Adding an endpoint — the whole checklist
 
 1. Handler in the matching `internal/server/handlers_*.go`, with a comment

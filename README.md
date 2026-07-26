@@ -591,6 +591,15 @@ path so the timing matches.
 insert an administrator, and `ON UPDATE RESTRICT` also blocks promoting an
 existing member to administrator.
 
+**Game seeds are private to the game master.** A game's PCG seed is not a
+credential — `internal/tokens` mints everything that is — but the engine is
+reproducible from it, which is the whole reason it is stored. A player who could
+read it could build the same stream and know the outcome of events before they
+were resolved. `GET /games/{id}` therefore omits `state.seed` for every seat but
+the game master's, and `POST /games/{id}/state` returns it only because nobody
+else can call it. It stays in the server log, which is an operator's to read and
+is where a turn is audited from.
+
 **Never exposed:** password hashes, activation-token hashes, session tokens,
 SQL, and filesystem paths. Responses are built from explicit view types, so a
 new database column cannot leak by accident.
@@ -697,6 +706,27 @@ apart. A second call is `409`, not an overwrite: the seed is what makes every
 later turn reproducible, so replacing it after play began would invalidate the
 turns already resolved. Setting up an inactive game is `409` too.
 
+**The seed is the game master's private information.** Once a game has been set
+up, `state` is sent to everyone at the table, but `state.seed` is present only
+for the game master's seat and is absent from a player's response entirely:
+
+```json
+{
+  "data": {
+    "id": 3, "name": "Alpha", "is_active": true, "is_gm": false,
+    "state": { "game_id": 3, "turn": 4, "created_at": "…", "updated_at": "…" }
+  }
+}
+```
+
+The reason is the same property that makes the seed worth storing. The engine is
+reproducible from it, so a player holding it can build the same stream and read
+the outcome of events before the game resolves them. Reproducibility is for the
+person running the game and for an operator auditing a turn — it is not for the
+people playing against it. `POST /games/{id}/state` returns the seed because only
+that game's master can reach the endpoint, and having chosen it or accepted the
+default they need to be able to record it.
+
 #### The roster
 
 One rule covers all three roster endpoints: **a game master may change player
@@ -704,6 +734,15 @@ seats, and a game master's seat is an administrator's business.**
 
 Everything else follows from it rather than being a rule of its own. Promotion
 is allowed and is one-way, because a demotion would be a change to a GM seat.
+
+Demotion is the case with the sharpest reason behind it, and the reason is
+knowledge rather than rank: a game master has seen the game's seed, and no change
+of seat can make them forget it. The engine is reproducible from that value, so a
+demoted game master sitting down as a player is a player who can predict the
+game, and the roster would show nothing out of the ordinary. Making that an
+administrator's decision — somebody who holds no seat and no stake in the game —
+is what keeps it a deliberate act rather than a control on a page.
+
 Deactivating a player is allowed and deactivating any game master is not —
 including your own seat, so a game cannot be left with nobody able to run it.
 `is_gm: false` is refused with `403` rather than ignored, so a client is never
@@ -1062,6 +1101,12 @@ What it holds:
   both.
 - A negative, fractional, overflowing, or empty seed word is a `422` naming
   `seed.hi` or `seed.lo`.
+- A player of a game that **has** been set up sees `state` — with its turn — and
+  no `seed`, while the same game read from the game master's seat carries one.
+  Both halves matter: the first is the rule, the second is what stops the test
+  passing because the state was rendered without a seed for some other reason.
+  The player's raw response body is searched for the seed words too, because a
+  nil field on a decoded struct proves the shape and not the payload.
 - A player at the same table cannot set the game up, a second setup is `409` and
   leaves the first seed in place, and an unseated account — including an
   administrator — gets `404` from both endpoints rather than `403`.
