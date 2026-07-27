@@ -13,17 +13,23 @@ import (
 	"github.com/mdhender/ecv8-api/internal/store"
 )
 
-// A game's cluster is its map, and generating one is the game master's job in
-// the same way setting the game up is. Both endpoints here go through
-// gameMasterSeat, so a player at the same table gets 403 and an account with no
-// seat gets 404 — the seat decides, exactly as it does everywhere under /games.
+// A game's cluster is its map. Reading it is anybody's at the table; making one
+// is the game master's job in the same way setting the game up is. So the two
+// endpoints here resolve different seats — playerSeat for the GET, and
+// gameMasterSeat for the POST — and the seat decides, exactly as it does
+// everywhere under /games. An account with no seat gets 404 from both.
 //
-// The map is not the seed. It is not withheld from players the way the seed is,
-// because a coordinate list says nothing about the future: the reference has
-// players reading stellium coordinates off their turn reports. There is simply
-// no player-facing map endpoint yet, and when there is one it belongs beside
-// the reports it is read with rather than on the page a game master generates
-// from.
+// **The map is not the seed, and is not withheld the way the seed is.** A seed
+// makes the engine reproducible, so a player holding one can resolve events
+// before the game does; a coordinate list says nothing about the future. The
+// reference has players reading stellium coordinates off their turn reports,
+// and space being a known shape is what makes a course worth plotting.
+//
+// What is *in* a stellium is a different question, and it is not on the wire
+// here because nothing stores it yet. When systems, planets, and deposits
+// arrive, whether a player sees the ones they have not surveyed is a rule about
+// those tables, not about this one — do not read the openness of the coordinate
+// list as having settled it.
 
 // clusterOptions is the starting point and the bounds the generate form works
 // inside, taken from the engine so that the values offered and the values
@@ -46,20 +52,27 @@ func clusterOptions() clusterOptionsView {
 	return view
 }
 
-// handleGetGameCluster returns a game's map, or what it would take to make one.
+// handleGetGameCluster returns a game's map to anybody seated at the game, and
+// to a game master additionally what it would take to make one.
 //
 // A game with no cluster is not an error, and neither is a game that has not
-// been set up: they are the two stages before a map exists, and the page shows
+// been set up: they are the two stages before a map exists, and a page shows
 // something different for each. The options for the form travel only with a
-// game that could actually use them, which is one that is set up, active, and
-// has no cluster yet — offering a form that cannot be submitted would invite
-// the question of what to do with it.
+// caller who could actually submit it — the game master of a game that is
+// active, set up, and has no cluster yet. A player never gets them however
+// ready the game is, so the form is not something a client has to decide to
+// hide; there is nothing to render.
+//
+// is_gm travels for the same reason it does on a game: it is what lets a page
+// say "you have not generated this yet" to one reader and "it has not been
+// generated yet" to another, without either of them working out whose page it
+// is from the shape of the rest of the answer.
 func (s *Server) handleGetGameCluster(c *echo.Context) error {
 	gameID, err := pathID(c, "gameID")
 	if err != nil {
 		return err
 	}
-	game, _, err := s.gameMasterSeat(c, gameID)
+	game, seat, err := s.playerSeat(c, gameID)
 	if err != nil {
 		return err
 	}
@@ -69,6 +82,7 @@ func (s *Server) handleGetGameCluster(c *echo.Context) error {
 		GameID:   game.ID,
 		GameName: game.Name,
 		IsActive: game.IsActive,
+		IsGM:     seat.IsGM,
 	}
 
 	switch _, err := s.db.GameStateByGameID(ctx, gameID); {
@@ -90,7 +104,7 @@ func (s *Server) handleGetGameCluster(c *echo.Context) error {
 		rendered := newClusterView(cluster, stelliums)
 		view.Cluster = &rendered
 	case errors.Is(err, store.ErrNotFound):
-		if view.IsSetUp && game.IsActive {
+		if seat.IsGM && view.IsSetUp && game.IsActive {
 			options := clusterOptions()
 			view.Options = &options
 		}

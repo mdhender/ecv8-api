@@ -681,7 +681,7 @@ silently ignored field.
 |--------|------|---------|
 | `GET` | `/games/{id}` | One game, its state, and whether you are its game master. |
 | `POST` | `/games/{id}/state` | Set the game up: write its initial state at turn 0. Game master only. |
-| `GET` | `/games/{id}/cluster` | The game's map, or the settings a generate form starts from. Game master only. |
+| `GET` | `/games/{id}/cluster` | The game's map. Any seat; the settings a generate form starts from come only for a game master. |
 | `POST` | `/games/{id}/cluster` | Generate the map and store it. Game master only. |
 | `GET` | `/games/{id}/players` | The human roster, active and inactive. Game master only. |
 | `POST` | `/games/{id}/players` | Add an account by `email`, as a player or `is_gm`. Game master only. |
@@ -748,17 +748,20 @@ default they need to be able to record it.
 
 A game's cluster is its map: the stelliums the reference calls the whole of
 accessible space. It is generated once, by the game master, after the game has
-been set up.
+been set up — and it is then read by everybody at the table.
 
-`GET /games/{id}/cluster` answers with whichever of three states the game is in,
-because the page shows something different for each and the server is what
-decides which:
+**The two methods ask the seat different questions.** Reading the map is
+anybody's; making one is the game master's. So `GET` resolves a player seat and
+`POST` a game master's, and an account with no seat gets `404` from both.
+
+`GET /games/{id}/cluster` answers with whichever state the game is in, because a
+page shows something different for each and the server is what decides which:
 
 ```json
 {
   "data": {
     "game_id": 3, "game_name": "Alpha", "is_active": true,
-    "is_set_up": true,
+    "is_gm": true, "is_set_up": true,
     "cluster": null,
     "options": {
       "generators": [{ "key": "kiss", "name": "KISS", "description": "…" }],
@@ -772,8 +775,15 @@ decides which:
 
 `is_set_up: false` means the game has no seed yet, and a cluster is drawn from
 the seed — so there is nothing to generate from and no `options`. They are also
-absent once a cluster exists, and for a deactivated game: a form that cannot be
-submitted only invites the question of what to do with it.
+absent once a cluster exists, for a deactivated game, and **for a player at any
+stage whatsoever**: a form that cannot be submitted only invites the question of
+what to do with it, and a player can never submit this one. A client therefore
+has nothing to hide — for a player there is nothing there.
+
+`is_gm` is what remains, and it exists for wording. "You have not generated this
+yet" and "it has not been generated yet" are one fact told to two readers, and
+deriving which from the absence of `options` would make a sentence depend on a
+rule about forms.
 
 **The bounds travel with the defaults on purpose.** They come from
 `internal/engine/generators`, which is the package they constrain, so the values
@@ -828,10 +838,18 @@ The map is drawn from the game's seed through `prng.TagCluster`, so the stored
 exactly. That is what makes the parameters worth storing: without them a cluster
 is a pile of coordinates nobody can check.
 
-Unlike the seed, none of this is withheld from anyone — a coordinate list says
-nothing about the future, and the reference has players reading stellium
-coordinates off their turn reports. There is simply no player-facing map
-endpoint yet; when there is one it belongs beside the reports it is read with.
+**The map is not the seed, and is not withheld the way the seed is.** A seed
+makes the engine reproducible, so a player who has one can resolve events before
+the game does. A coordinate list cannot: it says nothing about the future, the
+reference has players reading stellium coordinates off their turn reports, and
+space being a known shape is what makes a course worth plotting. A player
+therefore reads exactly the map its game master does, down to the ids — anything
+else would make every report they were sent unreadable.
+
+What is *in* a stellium is a different question. Systems, planets, and deposits
+are not stored yet, so nothing about them is on this wire; whether a player sees
+the ones they have not surveyed is a rule about those tables when they arrive.
+Do not read the openness of the coordinate list as having settled it.
 
 #### The roster
 
@@ -1252,9 +1270,19 @@ What they hold:
 - Asking for 1000 stelliums in a radius of 3 is a `422` against `radius`. It is
   the one rejection that can only be found by generating, so it is the one that
   would otherwise be an endpoint that never answers.
-- The seat decides both endpoints: a player at the same table gets `403`, an
-  unseated account and an administrator get `404`, and none of the refusals
-  leaves a map behind.
+- The seat decides both endpoints, and decides them differently: a player at the
+  same table reads the map (`200`) and cannot generate one (`403`), while an
+  unseated account and an administrator get `404` from both. None of the
+  refusals leaves a map behind.
+- **A player reads the same map, and is never offered the form.** The absence is
+  checked at the moment it would be hardest to get right — an active, set-up
+  game with no cluster, which is the one state where a form is being offered to
+  somebody — and the game master's seat is read at that same moment, so the
+  check cannot pass because nobody was offered anything. Once a cluster exists
+  the two seats are compared stellium by stellium, because a player reading
+  different coordinates would make every report they were sent unreadable.
+- A seat deactivated after the fact stops being able to read the map, on the
+  rule that removing a player from a game removes their view of it.
 
 ### The roster
 

@@ -418,8 +418,8 @@ func newClusterView(c *store.Cluster, stelliums []store.Stellium) clusterView {
 	return view
 }
 
-// gameClusterView is the cluster page: the map if there is one, and what it
-// would take to make one if there is not.
+// gameClusterView is the cluster page: the map if there is one, what it would
+// take to make one if there is not, and who is asking.
 //
 // Three states have to survive onto the wire, because the page shows something
 // different for each and the server is what decides which: a game that has not
@@ -429,12 +429,18 @@ func newClusterView(c *store.Cluster, stelliums []store.Stellium) clusterView {
 // into "no cluster" would leave the client to guess why, and it would guess by
 // re-deriving a rule the engine owns.
 //
-// Options is present only when the form can be submitted, matching the way
-// default_seed accompanies only a game the caller can set up.
+// The map itself is the same for everybody at the table. Options is present
+// only when the form can be submitted, so a player never receives it — matching
+// the way default_seed accompanies only a game the caller can set up. IsGM is
+// what remains for a page to word an empty map with: "you have not generated
+// this yet" and "it has not been generated yet" are the same fact told to
+// different readers, and deriving which from the absence of Options would make
+// the wording depend on a rule about forms.
 type gameClusterView struct {
 	GameID   int64  `json:"game_id"`
 	GameName string `json:"game_name"`
 	IsActive bool   `json:"is_active"`
+	IsGM     bool   `json:"is_gm"`
 	// IsSetUp reports whether the game has the state a cluster is drawn from.
 	IsSetUp bool                `json:"is_set_up"`
 	Cluster *clusterView        `json:"cluster"`

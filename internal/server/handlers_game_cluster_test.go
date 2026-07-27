@@ -3,6 +3,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -25,11 +26,12 @@ type clusterResponse struct {
 	} `json:"stelliums"`
 }
 
-// gameClusterResponse mirrors the three states the page branches on.
+// gameClusterResponse mirrors the states the page branches on.
 type gameClusterResponse struct {
 	GameID   int64            `json:"game_id"`
 	GameName string           `json:"game_name"`
 	IsActive bool             `json:"is_active"`
+	IsGM     bool             `json:"is_gm"`
 	IsSetUp  bool             `json:"is_set_up"`
 	Cluster  *clusterResponse `json:"cluster"`
 	// A pointer, because present and absent are the two answers that decide
@@ -420,9 +422,10 @@ func TestGenerateClusterRefusesMoreStelliumsThanTheRadiusHolds(t *testing.T) {
 	}
 }
 
-// The seat decides, exactly as it does everywhere under /games: a player at the
-// same table may not generate the map, and someone with no seat is not told the
-// game exists.
+// The seat decides, exactly as it does everywhere under /games — but the two
+// methods ask it different questions. Reading the map is anybody's at the
+// table; making one is the game master's. Someone with no seat is not told the
+// game exists either way.
 func TestClusterEndpointsAuthoriseOnTheSeat(t *testing.T) {
 	srv, admin, db := testServer(t)
 	gameID := createGame(t, srv, admin, "Guarded")
@@ -432,28 +435,33 @@ func TestClusterEndpointsAuthoriseOnTheSeat(t *testing.T) {
 	setUpGame(t, srv, gm, gameID, "")
 
 	cases := []struct {
-		name   string
-		cookie *http.Cookie
-		want   int
+		name         string
+		cookie       *http.Cookie
+		wantRead     int
+		wantGenerate int
 	}{
-		{"a player at the same table", signIn(t, db, "user1@example.com"), http.StatusForbidden},
-		{"an account with no seat", signIn(t, db, "user2@example.com"), http.StatusNotFound},
+		{"a player at the same table", signIn(t, db, "user1@example.com"),
+			http.StatusOK, http.StatusForbidden},
+		{"an account with no seat", signIn(t, db, "user2@example.com"),
+			http.StatusNotFound, http.StatusNotFound},
 		// An administrator can never hold a seat, so an administrator is not a
-		// player and reaches none of this.
-		{"an administrator", admin, http.StatusNotFound},
-		{"nobody", nil, http.StatusUnauthorized},
+		// player and reaches neither endpoint.
+		{"an administrator", admin, http.StatusNotFound, http.StatusNotFound},
+		{"nobody", nil, http.StatusUnauthorized, http.StatusUnauthorized},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			read := do(t, srv, testCase.cookie, http.MethodGet,
 				"/api/v1/games/"+itoa(gameID)+"/cluster", "")
-			if read.Code != testCase.want {
-				t.Errorf("GET status = %d, want %d; body %s", read.Code, testCase.want, read.Body.String())
+			if read.Code != testCase.wantRead {
+				t.Errorf("GET status = %d, want %d; body %s",
+					read.Code, testCase.wantRead, read.Body.String())
 			}
 			write := do(t, srv, testCase.cookie, http.MethodPost,
 				"/api/v1/games/"+itoa(gameID)+"/cluster", `{}`)
-			if write.Code != testCase.want {
-				t.Errorf("POST status = %d, want %d; body %s", write.Code, testCase.want, write.Body.String())
+			if write.Code != testCase.wantGenerate {
+				t.Errorf("POST status = %d, want %d; body %s",
+					write.Code, testCase.wantGenerate, write.Body.String())
 			}
 		})
 	}
@@ -462,5 +470,97 @@ func TestClusterEndpointsAuthoriseOnTheSeat(t *testing.T) {
 	page := getCluster(t, srv, gm, gameID)
 	if page.Cluster != nil {
 		t.Error("a refused request generated a cluster")
+	}
+}
+
+// A player reads the same map the game master does. It is not the seed: a
+// coordinate list says nothing about the future, and a course is only worth
+// plotting through space whose shape is known.
+//
+// What a player must never receive is the form. Its absence is the whole reason
+// a client does not have to decide whether to render one.
+func TestPlayerSeesTheMapButNeverTheForm(t *testing.T) {
+	srv, admin, db := testServer(t)
+	gameID := createGame(t, srv, admin, "Shared")
+	seatAccount(t, srv, admin, db, gameID, "gm1@example.com", true)
+	seatAccount(t, srv, admin, db, gameID, "user1@example.com", false)
+	gm := signIn(t, db, "gm1@example.com")
+	player := signIn(t, db, "user1@example.com")
+	setUpGame(t, srv, gm, gameID, "")
+
+	// Before a map exists the game is as ready as it will ever be, so this is
+	// the case where a player would be offered the form if anything did.
+	waiting := getCluster(t, srv, player, gameID)
+	if waiting.IsGM {
+		t.Error("is_gm = true for a player seat")
+	}
+	if !waiting.IsSetUp {
+		t.Error("is_set_up = false after the game was set up")
+	}
+	if waiting.Cluster != nil {
+		t.Errorf("cluster = %+v, want null before one is generated", waiting.Cluster)
+	}
+	if waiting.Options != nil {
+		t.Error("a player was offered the generate form")
+	}
+	// The same moment, from the game master's seat, does offer it — without
+	// this the check above would pass for the wrong reason.
+	if getCluster(t, srv, gm, gameID).Options == nil {
+		t.Fatal("the game master was not offered the form for a game ready for one")
+	}
+
+	recorder := do(t, srv, gm, http.MethodPost, "/api/v1/games/"+itoa(gameID)+"/cluster",
+		`{"stellium_count":30,"radius":7}`)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("generate: status %d, body %s", recorder.Code, recorder.Body.String())
+	}
+
+	fromPlayer := getCluster(t, srv, player, gameID)
+	fromGM := getCluster(t, srv, gm, gameID)
+	if fromPlayer.Cluster == nil {
+		t.Fatal("cluster = null for a player at a game that has one")
+	}
+	if fromPlayer.Options != nil {
+		t.Error("a player was offered the form for a game that already has a cluster")
+	}
+	if fromPlayer.IsGM {
+		t.Error("is_gm = true for a player seat")
+	}
+
+	// Byte for byte the same map, because it is one map. A player reading
+	// different coordinates from the game master would make every report they
+	// were sent unreadable.
+	if len(fromPlayer.Cluster.Stelliums) != len(fromGM.Cluster.Stelliums) {
+		t.Fatalf("player sees %d stelliums, game master sees %d",
+			len(fromPlayer.Cluster.Stelliums), len(fromGM.Cluster.Stelliums))
+	}
+	for i := range fromGM.Cluster.Stelliums {
+		if fromPlayer.Cluster.Stelliums[i] != fromGM.Cluster.Stelliums[i] {
+			t.Errorf("stellium %d = %+v for the player and %+v for the game master",
+				i, fromPlayer.Cluster.Stelliums[i], fromGM.Cluster.Stelliums[i])
+		}
+	}
+	if fromPlayer.Cluster.Generator != fromGM.Cluster.Generator ||
+		fromPlayer.Cluster.Radius != fromGM.Cluster.Radius ||
+		fromPlayer.Cluster.StelliumCount != fromGM.Cluster.StelliumCount {
+		t.Error("the map's settings differ between the two seats")
+	}
+
+	// A seat deactivated after the fact stops being able to read it, on the
+	// rule that removing a player from a game removes their view of it.
+	account, err := db.AccountByEmail(context.Background(), "user1@example.com")
+	if err != nil {
+		t.Fatalf("load seeded account: %v", err)
+	}
+	removed := do(t, srv, admin, http.MethodPut,
+		"/api/v1/admin/games/"+itoa(gameID)+"/memberships/"+itoa(account.ID),
+		`{"is_gm":false,"is_active":false}`)
+	if removed.Code != http.StatusOK {
+		t.Fatalf("deactivate seat: status %d, body %s", removed.Code, removed.Body.String())
+	}
+	gone := do(t, srv, player, http.MethodGet, "/api/v1/games/"+itoa(gameID)+"/cluster", "")
+	if gone.Code != http.StatusNotFound {
+		t.Errorf("status = %d for a deactivated seat, want 404; body %s",
+			gone.Code, gone.Body.String())
 	}
 }
