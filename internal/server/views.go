@@ -331,6 +331,116 @@ func newAgentSeatView(s *store.AgentSeat) agentSeatView {
 	}
 }
 
+// clusterGeneratorView is one cluster generator this build can run, as offered
+// to a game master choosing one.
+//
+// It is rendered from the engine's catalogue rather than from a table, for the
+// reason agentView gives: which generators exist is a property of this binary,
+// and a list read from the database could offer one the running code cannot
+// run.
+type clusterGeneratorView struct {
+	Key         string `json:"key"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// newClusterGeneratorView renders one entry of the engine's generator catalogue.
+func newClusterGeneratorView(d engine.GeneratorDescriptor) clusterGeneratorView {
+	return clusterGeneratorView{
+		Key:         d.Key,
+		Name:        d.Name,
+		Description: d.Description,
+	}
+}
+
+// clusterOptionsView is everything the generate form needs in order to offer a
+// starting point and stay inside the rules.
+//
+// The bounds travel because the client must not hold its own copy of them. A
+// range duplicated in the browser is wrong the first time the engine changes
+// its mind, and it would be wrong silently — the form would refuse a value the
+// server accepts, or offer one it rejects. This is the same rule that sends
+// default_seed instead of letting the setup form invent one.
+type clusterOptionsView struct {
+	Generators       []clusterGeneratorView `json:"generators"`
+	Generator        string                 `json:"generator"`
+	StelliumCount    int                    `json:"stellium_count"`
+	Radius           int                    `json:"radius"`
+	MinStelliumCount int                    `json:"min_stellium_count"`
+	MaxStelliumCount int                    `json:"max_stellium_count"`
+	MinRadius        int                    `json:"min_radius"`
+	MaxRadius        int                    `json:"max_radius"`
+}
+
+// stelliumView is one stellium on the map.
+//
+// The id and the coordinates both travel because they are different things: the
+// reference identifies a stellium by its integer id and displays it as
+// (x, y, z), and the two are needed together the moment a report has to be read
+// alongside a map.
+type stelliumView struct {
+	ID int64 `json:"id"`
+	X  int   `json:"x"`
+	Y  int   `json:"y"`
+	Z  int   `json:"z"`
+}
+
+// clusterView is a game's map, with the parameters it was generated from.
+//
+// The parameters are on the wire rather than kept for the server, because they
+// are what makes the map checkable: together with the game's seed they say what
+// would have to be repeated to get the same map, and a game master who cannot
+// see them has no way to tell one generated cluster from another.
+type clusterView struct {
+	GameID        int64          `json:"game_id"`
+	Generator     string         `json:"generator"`
+	StelliumCount int            `json:"stellium_count"`
+	Radius        int            `json:"radius"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
+	Stelliums     []stelliumView `json:"stelliums"`
+}
+
+// newClusterView renders a cluster and its stelliums.
+func newClusterView(c *store.Cluster, stelliums []store.Stellium) clusterView {
+	view := clusterView{
+		GameID:        c.GameID,
+		Generator:     c.GeneratorKey,
+		StelliumCount: c.StelliumCount,
+		Radius:        c.Radius,
+		CreatedAt:     c.CreatedAt,
+		UpdatedAt:     c.UpdatedAt,
+		Stelliums:     make([]stelliumView, 0, len(stelliums)),
+	}
+	for _, s := range stelliums {
+		view.Stelliums = append(view.Stelliums, stelliumView{ID: s.ID, X: s.X, Y: s.Y, Z: s.Z})
+	}
+	return view
+}
+
+// gameClusterView is the cluster page: the map if there is one, and what it
+// would take to make one if there is not.
+//
+// Three states have to survive onto the wire, because the page shows something
+// different for each and the server is what decides which: a game that has not
+// been set up cannot have a map at all, since a cluster is drawn from the seed
+// that setting up writes; a game that has been set up but has no cluster gets
+// the form; and a game with a cluster gets the map. Flattening the first two
+// into "no cluster" would leave the client to guess why, and it would guess by
+// re-deriving a rule the engine owns.
+//
+// Options is present only when the form can be submitted, matching the way
+// default_seed accompanies only a game the caller can set up.
+type gameClusterView struct {
+	GameID   int64  `json:"game_id"`
+	GameName string `json:"game_name"`
+	IsActive bool   `json:"is_active"`
+	// IsSetUp reports whether the game has the state a cluster is drawn from.
+	IsSetUp bool                `json:"is_set_up"`
+	Cluster *clusterView        `json:"cluster"`
+	Options *clusterOptionsView `json:"options,omitempty"`
+}
+
 // healthView is the body of the liveness and readiness endpoints.
 type healthView struct {
 	Status   string `json:"status"`

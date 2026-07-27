@@ -374,7 +374,8 @@ application            seam                engine
 account            game_player          game_state    turn, PCG seeds
 account_activation   .id is the         faction       controlled by a player_id
 session               engine's          entity        a ship or a colony
-game                  player_id
+game                  player_id         cluster       how the map was generated
+                                        stellium      one map coordinate
 ```
 
 **`game_player.id` is the engine's `player_id`, and it is the only identity that
@@ -404,6 +405,20 @@ onto such a table looks like integrity, but its parent row is only an assertion
 that some code exists — SQLite cannot check the thing that actually matters.
 The registry can, at seat time, and the listing reports a stranded seat as
 `playable: false` instead of hiding it.
+
+**The same is true of cluster generators.** `cluster` stores the `generator_key`
+its map was drawn with, the schema constrains that key's format only, and the
+catalogue is `clusterGenerators` in `internal/engine/generators.go`. Storing the
+key alongside `stellium_count` and `radius` is what makes a map checkable: those
+three values and the game's two seed words reproduce it exactly, because the
+draws come from `prng.TagCluster` addressed against the seeds rather than from
+whatever stream happened to be at hand.
+
+A `stellium` references `cluster`, not `game`, so a coordinate cannot exist
+without the map it belongs to, and `(game_id, x, y, z)` is unique. That is not
+tidiness: `prng` addresses a stellium's own draws by its coordinates precisely so
+that what is in a stellium does not depend on the order rows were written, and
+two stelliums sharing a coordinate would share every draw addressed to it.
 
 If the same code ever needs to run at different settings — "Aggressive (hard)"
 and "Aggressive (easy)" both dispatching to `aggressive` — that is an
@@ -666,6 +681,8 @@ silently ignored field.
 |--------|------|---------|
 | `GET` | `/games/{id}` | One game, its state, and whether you are its game master. |
 | `POST` | `/games/{id}/state` | Set the game up: write its initial state at turn 0. Game master only. |
+| `GET` | `/games/{id}/cluster` | The game's map, or the settings a generate form starts from. Game master only. |
+| `POST` | `/games/{id}/cluster` | Generate the map and store it. Game master only. |
 | `GET` | `/games/{id}/players` | The human roster, active and inactive. Game master only. |
 | `POST` | `/games/{id}/players` | Add an account by `email`, as a player or `is_gm`. Game master only. |
 | `PATCH` | `/games/{id}/players/{playerId}` | Promote to `is_gm`, or set `is_active`. Game master only. |
@@ -726,6 +743,95 @@ person running the game and for an operator auditing a turn — it is not for th
 people playing against it. `POST /games/{id}/state` returns the seed because only
 that game's master can reach the endpoint, and having chosen it or accepted the
 default they need to be able to record it.
+
+#### The cluster
+
+A game's cluster is its map: the stelliums the reference calls the whole of
+accessible space. It is generated once, by the game master, after the game has
+been set up.
+
+`GET /games/{id}/cluster` answers with whichever of three states the game is in,
+because the page shows something different for each and the server is what
+decides which:
+
+```json
+{
+  "data": {
+    "game_id": 3, "game_name": "Alpha", "is_active": true,
+    "is_set_up": true,
+    "cluster": null,
+    "options": {
+      "generators": [{ "key": "kiss", "name": "KISS", "description": "…" }],
+      "generator": "kiss", "stellium_count": 100, "radius": 15,
+      "min_stellium_count": 1, "max_stellium_count": 10000,
+      "min_radius": 3, "max_radius": 1024
+    }
+  }
+}
+```
+
+`is_set_up: false` means the game has no seed yet, and a cluster is drawn from
+the seed — so there is nothing to generate from and no `options`. They are also
+absent once a cluster exists, and for a deactivated game: a form that cannot be
+submitted only invites the question of what to do with it.
+
+**The bounds travel with the defaults on purpose.** They come from
+`internal/engine/generators`, which is the package they constrain, so the values
+a form offers and the values the endpoint accepts cannot drift apart. A client
+holding its own copy would be wrong — silently — the first time the engine
+changed its mind.
+
+`POST /games/{id}/cluster` takes all three, and all three are optional:
+
+```json
+{ "generator": "kiss", "stellium_count": 100, "radius": 15 }
+```
+
+It answers `201` with the cluster and every stellium in it, each carrying the
+integer id the rest of the engine refers to it by and the `(x, y, z)` reports
+display:
+
+```json
+{
+  "data": {
+    "game_id": 3, "generator": "kiss", "stellium_count": 100, "radius": 15,
+    "created_at": "…", "updated_at": "…",
+    "stelliums": [{ "id": 1, "x": -14, "y": 3, "z": -2 }]
+  }
+}
+```
+
+A second call is `409`, not a regeneration. Every turn is resolved on the map,
+so replacing it after play has begun would invalidate what has already happened
+— the same rule, for the same reason, as the seed. `cluster.game_id` is a
+primary key, so that holds whatever code writes the row.
+
+Generating before the game is set up is `409` too, as is generating for an
+inactive game. Neither is `422`: nothing in the request is wrong.
+
+Settings outside the bounds are `422` with an error against each field that is
+wrong, so a form is corrected once rather than a field at a time. One rejection
+cannot be predicted from the request: a sphere holds a finite number of distinct
+integer coordinates, and how many is a property of the generator's own rounding.
+Asking for more stelliums than fit is reported against `radius`, because raising
+it is the fix a game master has.
+
+**Which generators exist is a property of the binary**, exactly as it is for
+agents. The catalogue lives in `internal/engine` and is served from there; the
+schema constrains the *format* of `generator_key` and never the set of valid
+keys, for the reasons `0003_agent_key.sql` sets out at length. Adding a
+generator is one commit — write it under `internal/engine/generators`, add a
+line to `clusterGenerators` — and a game master can use it immediately.
+
+The map is drawn from the game's seed through `prng.TagCluster`, so the stored
+`generator`, `stellium_count`, and `radius` plus the two seed words reproduce it
+exactly. That is what makes the parameters worth storing: without them a cluster
+is a pile of coordinates nobody can check.
+
+Unlike the seed, none of this is withheld from anyone — a coordinate list says
+nothing about the future, and the reference has players reading stellium
+coordinates off their turn reports. There is simply no player-facing map
+endpoint yet; when there is one it belongs beside the reports it is read with.
 
 #### The roster
 
@@ -1111,6 +1217,44 @@ What it holds:
   leaves the first seed in place, and an unseated account — including an
   administrator — gets `404` from both endpoints rather than `403`.
 - A seat deactivated after the fact stops being able to read the game.
+
+### The cluster
+
+`store/cluster_test.go` tests what SQLite enforces and
+`server/handlers_game_cluster_test.go` tests what the endpoints answer, split
+that way because most of what matters about a map is a schema guarantee.
+
+What they hold:
+
+- Two stelliums at one coordinate is refused by the unique index, and the whole
+  insert rolls back — no cluster, no partial map. `prng` addresses a stellium's
+  draws by `(x, y, z)`, so two at one coordinate would share every draw, and the
+  test proves the database is what prevents it rather than the generator's
+  promise. The same coordinate in two *different* games is fine, which is the
+  case the index must not catch.
+- A second cluster is `ErrConflict` from the store and `409` from the endpoint,
+  and the refused request leaves the original radius in place.
+- The radius, stellium-count, and key-format bounds in `0004_cluster.sql` are
+  each tried and each refused. They restate constants in
+  `internal/engine/generators`, so this is what makes a widened Go constant
+  surface as a failure rather than silently storing a value no generator could
+  produce.
+- The defaults and bounds `GET` offers are compared against
+  `engine.DefaultGeneratorKey` and the `generators` constants, not against
+  literals — the point of sending them is that there is one source.
+- **The same seed and settings give the same map.** Two games set up with one
+  seed generate coordinate-for-coordinate identical clusters. Without this the
+  parameters stored beside a cluster would record nothing checkable, and the map
+  would depend on Go's map iteration order.
+- Generating before setup, and generating for a deactivated game, are `409`;
+  every out-of-range setting is a `422` naming the field, and all three at once
+  produce all three errors.
+- Asking for 1000 stelliums in a radius of 3 is a `422` against `radius`. It is
+  the one rejection that can only be found by generating, so it is the one that
+  would otherwise be an endpoint that never answers.
+- The seat decides both endpoints: a player at the same table gets `403`, an
+  unseated account and an administrator get `404`, and none of the refusals
+  leaves a map behind.
 
 ### The roster
 

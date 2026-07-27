@@ -110,6 +110,38 @@ type AgentSeat struct {
 	UpdatedAt time.Time
 }
 
+// Cluster is a game's map, described by what was asked for rather than by what
+// came back. Its stelliums are the answer; these three fields plus the game's
+// two seed words are the question, and together they reproduce the map exactly.
+//
+// Radius is an int here and an INTEGER on disk even though generators.Cluster
+// carries a float64, because a coordinate is an integer and a half-unit radius
+// would describe a sphere no coordinate could sit on the edge of.
+type Cluster struct {
+	GameID        int64
+	GeneratorKey  string
+	StelliumCount int
+	Radius        int
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+// Stellium is one gravitationally associated group of systems, at integer map
+// coordinates with the origin at the centre of the cluster.
+//
+// ID is what the rest of the engine will refer to a stellium by; the
+// coordinates are its address, both for display and for the draws prng
+// addresses by (x, y, z).
+type Stellium struct {
+	ID        int64
+	GameID    int64
+	X         int
+	Y         int
+	Z         int
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 // Session is a server-side authenticated session. The cookie value itself is
 // never stored; only its fingerprint is.
 type Session struct {
